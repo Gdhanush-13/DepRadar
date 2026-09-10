@@ -2,12 +2,9 @@ name: Deploy
 on: {push: {branches: [main]}}
 jobs:
   railway:
-    env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
-    if: ${{ env.RAILWAY_TOKEN != '' && env.RAILWAY_SERVICE_ID != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: bervProject/railway-deploy@v0.1.2
+        if: ${{ secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_SERVICE_ID != '' }}
         with: {token: '${{ secrets.RAILWAY_TOKEN }}', service: '${{ secrets.RAILWAY_SERVICE_ID }}'}
