@@ -6,8 +6,8 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db import get_db, init_db
 from .config import settings
+from .db import get_db, init_db
 from .models import Dependency, DependencySnapshot, Repository, Scan
 from .scoring import DependencySignals, dependency_score, freshness_score, risk_score
 from .services import github_repo, manifest, normalize_repo, package_meta
@@ -133,7 +133,7 @@ async def rescan_all(
         try:
             await scan_repo(item.owner, item.name, db)
             completed += 1
-        except Exception:
+        except Exception:  # noqa: S112
             continue
     return {"scanned": completed, "total": len(repos)}
 
