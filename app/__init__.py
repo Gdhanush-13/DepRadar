@@ -1,0 +1,1 @@
+"""DepRadar application."""
