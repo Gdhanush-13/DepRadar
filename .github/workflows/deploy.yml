@@ -2,7 +2,10 @@ name: Deploy
 on: {push: {branches: [main]}}
 jobs:
   railway:
-    if: ${{ secrets.RAILWAY_TOKEN != '' }}
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+    if: ${{ env.RAILWAY_TOKEN != '' && env.RAILWAY_SERVICE_ID != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
