@@ -1,12 +1,13 @@
 from datetime import UTC, datetime
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db, init_db
+from .config import settings
 from .models import Dependency, DependencySnapshot, Repository, Scan
 from .scoring import DependencySignals, dependency_score, freshness_score, risk_score
 from .services import github_repo, manifest, normalize_repo, package_meta
@@ -118,6 +119,23 @@ async def trigger_scan(owner: str, repo: str, db: AsyncSession = Depends(get_db)
         raise HTTPException(422, str(e)) from e
     except Exception as e:
         raise HTTPException(502, f"Scan failed: {e}") from e
+
+
+@app.post("/api/v1/internal/rescan-all")
+async def rescan_all(
+    x_internal_key: str | None = Header(default=None), db: AsyncSession = Depends(get_db)
+):
+    if x_internal_key != settings.internal_rescan_key:
+        raise HTTPException(401, "Invalid internal key")
+    repos = (await db.execute(select(Repository))).scalars().all()
+    completed = 0
+    for item in repos:
+        try:
+            await scan_repo(item.owner, item.name, db)
+            completed += 1
+        except Exception:
+            continue
+    return {"scanned": completed, "total": len(repos)}
 
 
 @app.get("/api/v1/repos/{owner}/{repo}/score")

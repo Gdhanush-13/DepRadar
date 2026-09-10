@@ -21,7 +21,7 @@ Architecture: browser (Jinja2 + HTMX + Alpine) → FastAPI → SQLAlchemy (SQLit
 
 ## Configuration
 
-Copy `.env.example` to `.env`. GitHub OAuth is optional for public one-off scans. Set `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, and `GITHUB_TOKEN` in production. Railway deployment is supported by `railway.toml`; automatic CD requires `RAILWAY_TOKEN` and `RAILWAY_SERVICE_ID` GitHub secrets.
+Copy `.env.example` to `.env`. GitHub OAuth is optional for public one-off scans. Set `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `INTERNAL_RESCAN_KEY`, and `GITHUB_TOKEN` in production. Render deploys automatically from `main`; Neon supplies Postgres and Upstash supplies Redis.
 
 ## API
 

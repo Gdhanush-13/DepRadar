@@ -1,0 +1,16 @@
+name: Nightly dependency rescan
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+jobs:
+  rescan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rescan all registered repositories
+        env:
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          INTERNAL_RESCAN_KEY: ${{ secrets.INTERNAL_RESCAN_KEY }}
+        run: |
+          test -n "$APP_BASE_URL"
+          curl --fail-with-body --silent --show-error -X POST "$APP_BASE_URL/api/v1/internal/rescan-all" -H "X-Internal-Key: $INTERNAL_RESCAN_KEY"

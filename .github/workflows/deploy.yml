@@ -1,10 +1,7 @@
-name: Deploy
+name: Render deployment
 on: {push: {branches: [main]}}
 jobs:
-  railway:
+  render:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: bervProject/railway-deploy@v0.1.2
-        if: ${{ secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_SERVICE_ID != '' }}
-        with: {token: '${{ secrets.RAILWAY_TOKEN }}', service: '${{ secrets.RAILWAY_SERVICE_ID }}'}
+      - run: echo "Render deploys this commit through its GitHub integration"

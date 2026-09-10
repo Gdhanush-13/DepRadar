@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
     app_base_url: str = "http://localhost:8000"
+    internal_rescan_key: str = "dev-internal-key-change-me"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
