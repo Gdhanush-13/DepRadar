@@ -37,8 +37,11 @@ async def scan_form(request: Request, repo: str = Form(...), db: AsyncSession = 
             "base_url": settings.app_base_url.rstrip("/"),
         })
     except Exception as exc:
+        message = str(exc)
+        if "rate limit" in message.lower():
+            message = "GitHub's API rate limit was reached. Add GITHUB_TOKEN in Render and try again."
         return templates.TemplateResponse(
-            request=request, name="error.html", context={"message": str(exc), "repo": repo}, status_code=422
+            request=request, name="error.html", context={"message": message, "repo": repo}, status_code=422
         )
 
 
