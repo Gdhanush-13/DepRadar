@@ -20,6 +20,11 @@ def cve_penalty(severities: tuple[str, ...]) -> float:
 
 
 def dependency_score(s: DependencySignals) -> float:
+    deductions = dependency_deductions(s)
+    return max(0.0, round(100 - sum(deductions.values()), 2))
+
+
+def dependency_deductions(s: DependencySignals) -> dict[str, float]:
     lag = min(40.0, max(0, s.versions_behind) * 8.0)
     age = (
         0
@@ -30,9 +35,8 @@ def dependency_score(s: DependencySignals) -> float:
         if s.days_since_last_release <= 365
         else 25
     )
-    return max(
-        0.0, round(100 - lag - age - (25 if s.archived else 0) - cve_penalty(s.cve_severities), 2)
-    )
+    return {"lag": lag, "age": age, "archived": 25.0 if s.archived else 0.0,
+            "cves": cve_penalty(s.cve_severities)}
 
 
 def freshness_score(scores: list[float]) -> float:

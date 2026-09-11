@@ -68,6 +68,7 @@ class Dependency(Base):
     ecosystem: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(300))
     current_version_required: Mapped[str] = mapped_column(String(100))
+    is_ignored: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class DependencySnapshot(Base):
@@ -81,6 +82,10 @@ class DependencySnapshot(Base):
     days_since_last_release: Mapped[int] = mapped_column(Integer, default=0)
     known_cves: Mapped[list] = mapped_column(JSON, default=list)
     points_deducted: Mapped[float] = mapped_column(Float, default=0)
+    lag_points: Mapped[float] = mapped_column(Float, default=0)
+    age_points: Mapped[float] = mapped_column(Float, default=0)
+    archived_points: Mapped[float] = mapped_column(Float, default=0)
+    cve_points: Mapped[float] = mapped_column(Float, default=0)
 
 
 class BadgeCache(Base):

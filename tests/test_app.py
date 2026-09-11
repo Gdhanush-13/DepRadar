@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, init_db
 from app.main import app, scan_repo
-from app.models import Repository, Scan
+from app.models import Dependency, DependencySnapshot, Repository, Scan, User
 
 
 @pytest.mark.asyncio
@@ -103,3 +103,62 @@ async def test_score_history_and_cached_badges():
     assert len(history.json()["history"]) >= 1
     assert "#ef4444" in badge.text
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_methodology_exports_and_comparison():
+    await init_db()
+    async with SessionLocal() as db:
+        repos = []
+        for owner, name, required in (("export", "one", "1"), ("export", "two", "2")):
+            repo = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{name}"))).scalar_one_or_none()
+            if repo is None:
+                repo = Repository(owner=owner, name=name, full_name=f"{owner}/{name}")
+                db.add(repo)
+                await db.flush()
+            dep = Dependency(repository_id=repo.id, ecosystem="pypi", name="shared", current_version_required=required)
+            db.add(dep)
+            await db.flush()
+            scan = Scan(repository_id=repo.id, status="complete", freshness_score=80, risk_score=20,
+                        commit_sha_scanned="abc123")
+            db.add(scan)
+            await db.flush()
+            db.add(DependencySnapshot(scan_id=scan.id, dependency_id=dep.id, latest_version="3",
+                                      points_deducted=10, lag_points=8, age_points=2))
+            repos.append(repo)
+        await db.commit()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        methodology = await client.get("/methodology")
+        markdown = await client.get("/api/v1/repos/export/one/export.md")
+        payload = await client.get("/api/v1/repos/export/one/export.json")
+        comparison = await client.get("/compare?a=export/one&b=export/two")
+    assert methodology.status_code == 200 and "Version lag" in methodology.text
+    assert markdown.status_code == 200 and "# DepRadar report" in markdown.text and "| shared |" in markdown.text
+    assert payload.status_code == 200 and payload.json()["commit_sha_scanned"] == "abc123"
+    assert comparison.status_code == 200 and "shared" in comparison.text
+
+
+@pytest.mark.asyncio
+async def test_registered_dependency_ignore_recalculates_score():
+    await init_db()
+    async with SessionLocal() as db:
+        user = User(github_id="ignore-user", username="ignore-user")
+        db.add(user)
+        await db.flush()
+        repo = Repository(owner="ignore", name="repo", full_name="ignore/repo", registered_by_user_id=user.id)
+        db.add(repo)
+        await db.flush()
+        dep = Dependency(repository_id=repo.id, ecosystem="pypi", name="pytest", current_version_required="1")
+        db.add(dep)
+        await db.flush()
+        scan = Scan(repository_id=repo.id, status="complete", freshness_score=50, risk_score=20)
+        db.add(scan)
+        await db.flush()
+        db.add(DependencySnapshot(scan_id=scan.id, dependency_id=dep.id, points_deducted=50))
+        await db.commit()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post("/api/v1/repos/ignore/repo/dependencies/pytest/ignore?ignored=true")
+        changed = await client.post("/api/v1/repos/ignore/repo/dependencies/pytest/ignore?ignored=true",
+                                    headers={"X-User-ID": str(user.id)})
+    assert denied.status_code == 401
+    assert changed.status_code == 200 and changed.json()["ignored"] is True

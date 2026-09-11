@@ -17,6 +17,9 @@ The example badge is intentionally shown as `not scanned` until a repository sca
 - Freshness and risk scores with dependency-level details.
 - SVG badges for README files, with `?metric=freshness` or `?metric=risk`.
 - Scan history and a score trend page.
+- Expandable per-factor deduction explanations on every dependency row.
+- Markdown and JSON report downloads plus side-by-side comparison for scanned repositories.
+- Ownership-gated per-repository dependency ignore state; ignored rows remain visible and are excluded from the score.
 - JSON API for scores, history, scans, health, and scheduled rescans.
 - SQLite for local development and PostgreSQL for production.
 
@@ -74,6 +77,10 @@ Optional variables include `GITHUB_TOKEN` (recommended in production to avoid Gi
 | `GET` | `/badge/{owner}/{repo}.svg` | Freshness badge |
 | `GET` | `/badge/{owner}/{repo}.svg?metric=risk` | Risk badge |
 | `GET` | `/history/{owner}/{repo}` | Web scan history |
+| `GET` | `/methodology` | Plain-language scoring explanation |
+| `GET` | `/compare?a=OWNER/REPO&b=OWNER/REPO` | Compare two completed scans |
+| `GET` | `/api/v1/repos/{owner}/{repo}/export.md` | Download Markdown report |
+| `GET` | `/api/v1/repos/{owner}/{repo}/export.json` | Download structured JSON report |
 | `GET` | `/api/v1/repos/{owner}/{repo}/score` | Latest score JSON |
 | `GET` | `/api/v1/repos/{owner}/{repo}/history` | History JSON |
 | `POST` | `/api/v1/repos/{owner}/{repo}/scan` | Programmatic scan |
@@ -100,6 +107,10 @@ python -m pytest --cov=app --cov-report=term-missing
 ```
 
 The current test suite covers web routes, badge states, the scan-to-badge flow, manifest parsers, scoring, and the protected internal endpoint.
+
+## Roadmap
+
+The product backlog includes a full GitHub OAuth registration UI, SMTP score-drop alerts, public leaderboard/gallery, organization dashboards, Slack/webhook notifications, and Cargo/Go module adapters. These are intentionally separate from the public anonymous scan path so credentials and ownership are never inferred.
 
 ## License
 

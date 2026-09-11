@@ -1,6 +1,8 @@
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -38,3 +40,18 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        # Keep existing free-tier databases compatible with additive model changes.
+        for table, (column, definition) in (
+            ("dependencies", ("is_ignored", "BOOLEAN DEFAULT FALSE")),
+            ("dependency_snapshots", ("lag_points", "FLOAT DEFAULT 0")),
+            ("dependency_snapshots", ("age_points", "FLOAT DEFAULT 0")),
+            ("dependency_snapshots", ("archived_points", "FLOAT DEFAULT 0")),
+            ("dependency_snapshots", ("cve_points", "FLOAT DEFAULT 0")),
+        ):
+            clause = "IF NOT EXISTS " if connection.dialect.name != "sqlite" else ""
+            statement = f"ALTER TABLE {table} ADD COLUMN {clause}{column} {definition}"
+            try:
+                await connection.execute(text(statement))
+            except SQLAlchemyError:
+                # Existing columns are harmless; startup must remain available during rollout.
+                continue

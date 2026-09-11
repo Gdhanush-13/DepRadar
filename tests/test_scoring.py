@@ -19,6 +19,14 @@ def test_penalties():
     )
 
 
+def test_factor_breakdown_matches_total_deduction():
+    signals = DependencySignals(versions_behind=2, days_since_last_release=200,
+                                archived=True, cve_severities=("HIGH", "LOW"))
+    deductions = dependency_deductions(signals)
+    assert sum(deductions.values()) == 16 + 15 + 25 + 14
+    assert 100 - sum(deductions.values()) == dependency_score(signals)
+
+
 def test_cves():
     assert cve_penalty(("critical", "low")) == 20
 

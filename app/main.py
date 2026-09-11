@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .db import get_db, init_db
 from .models import BadgeCache, Dependency, DependencySnapshot, Repository, Scan
-from .scoring import DependencySignals, dependency_score, freshness_score, risk_score
+from .scoring import (
+    DependencySignals,
+    dependency_deductions,
+    dependency_score,
+    freshness_score,
+    risk_score,
+)
 from .services import github_repo, manifest, normalize_repo, package_meta
 
 app = FastAPI(title="DepRadar", version="1.0.0", description="Dependency freshness and risk radar")
@@ -56,6 +62,9 @@ async def dependency_rows(scan_id: int, db: AsyncSession) -> list[dict[str, obje
         "latest": snap.latest_version, "behind": snap.versions_behind,
         "days": snap.days_since_last_release, "archived": snap.is_archived_upstream,
         "cves": snap.known_cves, "score": max(0, 100 - snap.points_deducted),
+        "ignored": dep.is_ignored,
+        "deductions": {"lag": snap.lag_points, "age": snap.age_points,
+                        "archived": snap.archived_points, "cves": snap.cve_points},
     } for dep, snap in rows.all()]
 
 
@@ -97,16 +106,23 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
     signals = []
     scores = []
     for eco, dep_name, required in deps[:100]:
-        dep = Dependency(
-            repository_id=repo.id, ecosystem=eco, name=dep_name, current_version_required=required
-        )
-        db.add(dep)
-        await db.flush()
+        dep = (await db.execute(select(Dependency).where(
+            Dependency.repository_id == repo.id, Dependency.ecosystem == eco, Dependency.name == dep_name
+        ).order_by(Dependency.id.desc()).limit(1))).scalar_one_or_none()
+        if dep is None:
+            dep = Dependency(repository_id=repo.id, ecosystem=eco, name=dep_name,
+                             current_version_required=required)
+            db.add(dep)
+            await db.flush()
+        else:
+            dep.current_version_required = required
         latest_v, behind, days, archived, cves = await package_meta(eco, dep_name)
         sig = DependencySignals(behind, days, archived, cves)
+        deductions = dependency_deductions(sig)
         score = dependency_score(sig)
-        signals.append(sig)
-        scores.append(score)
+        if not dep.is_ignored:
+            signals.append(sig)
+            scores.append(score)
         db.add(
             DependencySnapshot(
                 scan_id=scan.id,
@@ -117,6 +133,8 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
                 is_archived_upstream=archived,
                 known_cves=list(cves),
                 points_deducted=100 - score,
+                lag_points=deductions["lag"], age_points=deductions["age"],
+                archived_points=deductions["archived"], cve_points=deductions["cves"],
             )
         )
     scan.freshness_score = freshness_score(scores)
@@ -145,6 +163,37 @@ async def trigger_scan(owner: str, repo: str, db: AsyncSession = Depends(get_db)
         raise HTTPException(422, str(e)) from e
     except Exception as e:
         raise HTTPException(502, f"Scan failed: {e}") from e
+
+
+@app.post("/api/v1/repos/{owner}/{repo}/dependencies/{dependency}/ignore")
+async def set_dependency_ignored(
+    owner: str, repo: str, dependency: str, ignored: bool = Query(...),
+    x_user_id: int | None = Header(default=None), db: AsyncSession = Depends(get_db),
+):
+    item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))).scalar_one_or_none()
+    if not item or not item.registered_by_user_id or x_user_id != item.registered_by_user_id:
+        raise HTTPException(401, "Only the user who registered this repository can change ignore state")
+    dep = (await db.execute(select(Dependency).where(
+        Dependency.repository_id == item.id, Dependency.name == dependency
+    ))).scalar_one_or_none()
+    scan = await latest(item, db)
+    if not dep or not scan:
+        raise HTTPException(404, "Dependency or completed scan not found")
+    dep.is_ignored = ignored
+    snapshots = (await db.execute(select(DependencySnapshot).where(DependencySnapshot.scan_id == scan.id))).scalars().all()
+    active = []
+    for snap in snapshots:
+        snap_dep = await db.get(Dependency, snap.dependency_id)
+        if snap_dep is not None and not snap_dep.is_ignored:
+            active.append(max(0, 100 - snap.points_deducted))
+    scan.freshness_score = freshness_score(active)
+    cache = await db.get(BadgeCache, item.full_name)
+    if cache:
+        cache.score = scan.freshness_score
+        cache.svg_body = badge_svg("DepRadar", f"{scan.freshness_score:.0f}", score_color(scan.freshness_score))
+    await db.commit()
+    return {"repository": item.full_name, "dependency": dependency, "ignored": ignored,
+            "freshness_score": scan.freshness_score}
 
 
 @app.post("/api/v1/internal/rescan-all")
@@ -253,3 +302,60 @@ async def history_page(owner: str, repo: str, request: Request, db: AsyncSession
     return templates.TemplateResponse(request=request, name="history.html", context={
         "repo": item.full_name, "scans": scans
     })
+
+
+@app.get("/methodology", response_class=HTMLResponse)
+async def methodology(request: Request):
+    return templates.TemplateResponse(request=request, name="methodology.html", context={})
+
+
+async def scan_payload(repo: str, scan: Scan, dependencies: list[dict[str, object]]) -> dict[str, object]:
+    return {"repository": repo, "status": scan.status, "freshness_score": scan.freshness_score,
+            "risk_score": scan.risk_score, "scanned_at": scan.finished_at,
+            "commit_sha_scanned": scan.commit_sha_scanned, "dependencies": dependencies}
+
+
+@app.get("/api/v1/repos/{owner}/{repo}/export.json")
+async def export_json(owner: str, repo: str, db: AsyncSession = Depends(get_db)):
+    item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))).scalar_one_or_none()
+    scan = await latest(item, db) if item else None
+    if not item or not scan:
+        raise HTTPException(404, "Repository has not been scanned")
+    return await scan_payload(item.full_name, scan, await dependency_rows(scan.id, db))
+
+
+@app.get("/api/v1/repos/{owner}/{repo}/export.md", response_class=Response)
+async def export_markdown(owner: str, repo: str, db: AsyncSession = Depends(get_db)):
+    item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))).scalar_one_or_none()
+    scan = await latest(item, db) if item else None
+    if not item or not scan:
+        raise HTTPException(404, "Repository has not been scanned")
+    deps = await dependency_rows(scan.id, db)
+    lines = [f"# DepRadar report: {item.full_name}", "", f"- Freshness: {scan.freshness_score:.2f}",
+             f"- Risk: {scan.risk_score:.2f}", f"- Scanned: {scan.finished_at}",
+             f"- Commit: `{scan.commit_sha_scanned or 'unknown'}`", "", "| Dependency | Required | Latest | Score | State |", "| --- | --- | --- | ---: | --- |"]
+    lines += [f"| {d['name']} | {d['required']} | {d['latest']} | {d['score']:.0f} | {'ignored' if d['ignored'] else 'counted'} |" for d in deps]
+    return Response("\n".join(lines) + "\n", media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{owner}-{repo}-depradar.md"'})
+
+
+@app.get("/compare", response_class=HTMLResponse)
+async def compare_page(request: Request, a: str, b: str, db: AsyncSession = Depends(get_db)):
+    try:
+        a_owner, a_name = normalize_repo(a); b_owner, b_name = normalize_repo(b)
+        items = []
+        for owner, name in ((a_owner, a_name), (b_owner, b_name)):
+            item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{name}"))).scalar_one_or_none()
+            if not item:
+                raise ValueError(f"{owner}/{name} has not been scanned yet; scan it first")
+            scan = await latest(item, db)
+            if not scan:
+                raise ValueError(f"{item.full_name} has no completed scan")
+            items.append((item, scan, await dependency_rows(scan.id, db)))
+        merged: dict[str, list[dict[str, object]]] = {}
+        for index, (_, _, deps) in enumerate(items):
+            for dep in deps:
+                merged.setdefault(str(dep["name"]), [{}, {}])[index] = dep
+        return templates.TemplateResponse(request=request, name="compare.html", context={"a": items[0], "b": items[1], "merged": merged})
+    except ValueError as exc:
+        return templates.TemplateResponse(request=request, name="error.html", context={"message": str(exc), "repo": f"{a} vs {b}"}, status_code=404)
