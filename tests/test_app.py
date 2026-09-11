@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -141,11 +143,12 @@ async def test_methodology_exports_and_comparison():
 @pytest.mark.asyncio
 async def test_registered_dependency_ignore_recalculates_score():
     await init_db()
+    suffix = uuid4().hex[:8]
     async with SessionLocal() as db:
-        user = User(github_id="ignore-user", username="ignore-user")
+        user = User(github_id=f"ignore-user-{suffix}", username=f"ignore-user-{suffix}")
         db.add(user)
         await db.flush()
-        repo = Repository(owner="ignore", name="repo", full_name="ignore/repo", registered_by_user_id=user.id)
+        repo = Repository(owner="ignore", name=suffix, full_name=f"ignore/{suffix}", registered_by_user_id=user.id)
         db.add(repo)
         await db.flush()
         dep = Dependency(repository_id=repo.id, ecosystem="pypi", name="pytest", current_version_required="1")
@@ -157,8 +160,8 @@ async def test_registered_dependency_ignore_recalculates_score():
         db.add(DependencySnapshot(scan_id=scan.id, dependency_id=dep.id, points_deducted=50))
         await db.commit()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        denied = await client.post("/api/v1/repos/ignore/repo/dependencies/pytest/ignore?ignored=true")
-        changed = await client.post("/api/v1/repos/ignore/repo/dependencies/pytest/ignore?ignored=true",
+        denied = await client.post(f"/api/v1/repos/ignore/{suffix}/dependencies/pytest/ignore?ignored=true")
+        changed = await client.post(f"/api/v1/repos/ignore/{suffix}/dependencies/pytest/ignore?ignored=true",
                                     headers={"X-User-ID": str(user.id)})
     assert denied.status_code == 401
     assert changed.status_code == 200 and changed.json()["ignored"] is True
