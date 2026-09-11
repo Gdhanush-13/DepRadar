@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,19 @@ from .services import github_repo, manifest, normalize_repo, package_meta
 
 app = FastAPI(title="DepRadar", version="1.0.0", description="Dependency freshness and risk radar")
 templates = Jinja2Templates(directory="app/templates")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.middleware("http")
+async def inject_design_system(request: Request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if not content_type.startswith("text/html"):
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    body = body.replace(b"</head>", b'<link rel="stylesheet" href="/static/styles.css"></head>', 1)
+    headers = {key: value for key, value in response.headers.items() if key.lower() != "content-length"}
+    return Response(body, status_code=response.status_code, headers=headers, media_type="text/html")
 
 
 @app.on_event("startup")
