@@ -1,14 +1,13 @@
 from collections.abc import AsyncGenerator
 
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from .config import settings
 
 
-
-def _database_engine_args() -> tuple[object, dict[str, object]]:
+def _database_engine_args() -> tuple[URL, dict[str, object]]:
     """Adapt provider-style PostgreSQL URLs for asyncpg."""
     url = make_url(settings.database_url)
     connect_args: dict[str, object] = {}
