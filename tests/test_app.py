@@ -59,10 +59,18 @@ async def test_home_history_and_scan_error_pages(monkeypatch):
         raise ValueError("GitHub repository was not found")
 
     monkeypatch.setattr("app.main.github_repo", missing_repo)
+    async with SessionLocal() as db:
+        repo = (await db.execute(select(Repository).where(Repository.full_name == "history/test"))).scalar_one_or_none()
+        if repo is None:
+            repo = Repository(owner="history", name="test", full_name="history/test")
+            db.add(repo)
+            await db.flush()
+            db.add(Scan(repository_id=repo.id, status="complete", freshness_score=80, risk_score=20))
+            await db.commit()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         home = await client.get("/")
         error = await client.post("/scan", data={"repo": "doesnotexist123/fake"})
-        history = await client.get("/history/acme/widget")
+        history = await client.get("/history/history/test")
     assert home.status_code == 200 and "Know when" in home.text
     assert error.status_code == 422 and "couldn’t complete" in error.text
     assert history.status_code == 200 and "Scan history" in history.text
