@@ -354,7 +354,14 @@ async def export_markdown(owner: str, repo: str, db: AsyncSession = Depends(get_
 
 
 @app.get("/compare", response_class=HTMLResponse)
-async def compare_page(request: Request, a: str, b: str, db: AsyncSession = Depends(get_db)):
+async def compare_page(
+    request: Request,
+    a: str | None = Query(default=None),
+    b: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    if not a or not b:
+        return templates.TemplateResponse(request=request, name="compare_form.html")
     try:
         a_owner, a_name = normalize_repo(a); b_owner, b_name = normalize_repo(b)
         items = []
