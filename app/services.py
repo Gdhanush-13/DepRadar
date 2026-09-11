@@ -1,10 +1,14 @@
+import json
 import re
+import tomllib
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 from .config import settings
+
+DependencySpec = tuple[str, str, str]
 
 
 def normalize_repo(value: str) -> tuple[str, str]:
@@ -36,7 +40,7 @@ async def manifest(owner: str, repo: str, branch: str) -> list[tuple[str, str, s
     headers = {"Accept": "application/vnd.github.raw+json"}
     if settings.github_token:
         headers["Authorization"] = f"Bearer {settings.github_token}"
-    result: list[tuple[str, str, str]] = []
+    result: list[DependencySpec] = []
     async with httpx.AsyncClient(timeout=12) as client:
         for filename, eco in (
             ("requirements.txt", "pypi"),
@@ -49,24 +53,41 @@ async def manifest(owner: str, repo: str, branch: str) -> list[tuple[str, str, s
             )
             if r.status_code != 200:
                 continue
-            text = r.text
-            if filename == "package.json":
-                import json
-
-                data = json.loads(text)
-                for name, version in {
-                    **data.get("dependencies", {}),
-                    **data.get("devDependencies", {}),
-                }.items():
-                    result.append((eco, name, version))
-            else:
-                for line in text.splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and re.match(r"^[A-Za-z0-9_.-]+", line):
-                        match = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", line)
-                        if match:
-                            result.append((eco, match.group(1), match.group(2) or "unbounded"))
+            result.extend(parse_manifest(filename, r.text))
     return result
+
+
+def parse_manifest(filename: str, content: str) -> list[DependencySpec]:
+    """Parse common Python and JavaScript dependency manifests."""
+    if filename == "package.json":
+        data = json.loads(content)
+        return [("npm", name, version) for name, version in {
+            **data.get("dependencies", {}), **data.get("devDependencies", {})
+        }.items()]
+    if filename == "pyproject.toml":
+        data = tomllib.loads(content)
+        raw = data.get("project", {}).get("dependencies", [])
+        raw += list(data.get("tool", {}).get("poetry", {}).get("dependencies", {}).items())
+        result = []
+        for item in raw:
+            name, version = item if isinstance(item, tuple) else _split_requirement(item)
+            if name.lower() != "python":
+                result.append(("pypi", name, version))
+        return result
+    result = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line and not line.startswith(("#", "-")):
+            name, version = _split_requirement(line)
+            result.append(("pypi", name, version))
+    return result
+
+
+def _split_requirement(value: str) -> tuple[str, str]:
+    match = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", value)
+    if not match:
+        return value, "unbounded"
+    return match.group(1), match.group(2) or "unbounded"
 
 
 async def package_meta(eco: str, name: str) -> tuple[str, int, int, bool, tuple[str, ...]]:

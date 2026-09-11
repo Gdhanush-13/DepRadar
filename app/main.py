@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_db, init_db
-from .models import Dependency, DependencySnapshot, Repository, Scan
+from .models import BadgeCache, Dependency, DependencySnapshot, Repository, Scan
 from .scoring import DependencySignals, dependency_score, freshness_score, risk_score
 from .services import github_repo, manifest, normalize_repo, package_meta
 
@@ -31,13 +31,29 @@ async def scan_form(request: Request, repo: str = Form(...), db: AsyncSession = 
     try:
         owner, name = normalize_repo(repo)
         scan = await scan_repo(owner, name, db)
-        return templates.TemplateResponse(
-            request=request, name="results.html", context={"repo": f"{owner}/{name}", "scan": scan}
-        )
+        dependencies = await dependency_rows(scan.id, db)
+        return templates.TemplateResponse(request=request, name="results.html", context={
+            "repo": f"{owner}/{name}", "scan": scan, "dependencies": dependencies,
+            "base_url": settings.app_base_url.rstrip("/"),
+        })
     except Exception as exc:
         return templates.TemplateResponse(
-            request=request, name="error.html", context={"message": str(exc)}, status_code=422
+            request=request, name="error.html", context={"message": str(exc), "repo": repo}, status_code=422
         )
+
+
+async def dependency_rows(scan_id: int, db: AsyncSession) -> list[dict[str, object]]:
+    rows = await db.execute(
+        select(Dependency, DependencySnapshot)
+        .join(DependencySnapshot, DependencySnapshot.dependency_id == Dependency.id)
+        .where(DependencySnapshot.scan_id == scan_id)
+    )
+    return [{
+        "name": dep.name, "ecosystem": dep.ecosystem, "required": dep.current_version_required,
+        "latest": snap.latest_version, "behind": snap.versions_behind,
+        "days": snap.days_since_last_release, "archived": snap.is_archived_upstream,
+        "cves": snap.known_cves, "score": max(0, 100 - snap.points_deducted),
+    } for dep, snap in rows.all()]
 
 
 async def latest(repo: Repository, db: AsyncSession):
@@ -105,6 +121,13 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
     scan.status = "complete"
     scan.finished_at = datetime.now(UTC)
     repo.last_scanned_at = scan.finished_at
+    cache = await db.get(BadgeCache, repo.full_name)
+    body = badge_svg("DepRadar", f"{scan.freshness_score:.0f}", score_color(scan.freshness_score or 0))
+    if cache is None:
+        cache = BadgeCache(repo_full_name=repo.full_name, svg_body=body, score=scan.freshness_score or 0)
+        db.add(cache)
+    else:
+        cache.svg_body, cache.score, cache.generated_at = body, scan.freshness_score or 0, datetime.now(UTC)
     await db.commit()
     return scan
 
@@ -190,6 +213,10 @@ def badge_svg(label: str, value: str, color: str) -> str:
     return f'<svg xmlns="http://www.w3.org/2000/svg" width="190" height="20" role="img" aria-label="{label}: {value}"><title>{label}: {value}</title><rect width="190" height="20" rx="3" fill="#555"/><rect x="100" width="90" height="20" rx="3" fill="{color}"/><text x="50" y="14" fill="#fff" text-anchor="middle" font-family="Verdana" font-size="11">{label}</text><text x="145" y="14" fill="#fff" text-anchor="middle" font-family="Verdana" font-size="11">{value}</text></svg>'
 
 
+def score_color(value: float) -> str:
+    return "#22c55e" if value >= 80 else "#eab308" if value >= 50 else "#ef4444"
+
+
 @app.get("/badge/{owner}/{repo}.svg")
 async def badge(
     owner: str, repo: str, metric: str = Query("freshness"), db: AsyncSession = Depends(get_db)
@@ -200,10 +227,26 @@ async def badge(
     scan = await latest(item, db) if item else None
     value = (scan.risk_score if metric == "risk" else scan.freshness_score) if scan else None
     if value is None:
-        value = 0
-    color = "#4c1" if value >= 80 else "#dfb317" if value >= 50 else "#e05d44"
+        return Response(
+            badge_svg("DepRadar", "not scanned", "#64748b"), media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
+    color = score_color(value)
     return Response(
         badge_svg("DepRadar", f"{value:.0f}", color),
         media_type="image/svg+xml",
         headers={"Cache-Control": "public, max-age=300"},
     )
+
+
+@app.get("/history/{owner}/{repo}", response_class=HTMLResponse)
+async def history_page(owner: str, repo: str, request: Request, db: AsyncSession = Depends(get_db)):
+    item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))).scalar_one_or_none()
+    if not item:
+        return templates.TemplateResponse(request=request, name="error.html", context={
+            "message": "This repository has not been scanned yet.", "repo": f"{owner}/{repo}"
+        }, status_code=404)
+    scans = (await db.execute(select(Scan).where(Scan.repository_id == item.id).order_by(Scan.started_at))).scalars().all()
+    return templates.TemplateResponse(request=request, name="history.html", context={
+        "repo": item.full_name, "scans": scans
+    })
