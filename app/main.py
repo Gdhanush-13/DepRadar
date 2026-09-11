@@ -367,16 +367,17 @@ async def compare_page(
         items = []
         for owner, name in ((a_owner, a_name), (b_owner, b_name)):
             item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{name}"))).scalar_one_or_none()
-            if not item:
-                raise ValueError(f"{owner}/{name} has not been scanned yet; scan it first")
-            scan = await latest(item, db)
-            if not scan:
-                raise ValueError(f"{item.full_name} has no completed scan")
+            scan = await latest(item, db) if item else None
+            if not item or not scan or scan.status != "complete":
+                scan = await scan_repo(owner, name, db)
+                item = (await db.execute(select(Repository).where(
+                    Repository.full_name == f"{owner}/{name}"
+                ))).scalar_one()
             items.append((item, scan, await dependency_rows(scan.id, db)))
         merged: dict[str, list[dict[str, object]]] = {}
         for index, (_, _, deps) in enumerate(items):
             for dep in deps:
                 merged.setdefault(str(dep["name"]), [{}, {}])[index] = dep
         return templates.TemplateResponse(request=request, name="compare.html", context={"a": items[0], "b": items[1], "merged": merged})
-    except ValueError as exc:
+    except Exception as exc:
         return templates.TemplateResponse(request=request, name="error.html", context={"message": str(exc), "repo": f"{a} vs {b}"}, status_code=404)
