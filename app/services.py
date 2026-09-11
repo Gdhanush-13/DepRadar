@@ -1,6 +1,7 @@
 import json
 import re
 import tomllib
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,6 +55,21 @@ async def manifest(owner: str, repo: str, branch: str) -> list[tuple[str, str, s
             if r.status_code != 200:
                 continue
             result.extend(parse_manifest(filename, r.text))
+        tree = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1",
+            headers={"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {settings.github_token}"} if settings.github_token else {})},
+        )
+        if tree.status_code == 200:
+            for path in tree.json().get("tree", []):
+                filename = path.get("path", "")
+                if not filename.lower().endswith(".csproj"):
+                    continue
+                r = await client.get(
+                    f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{filename}",
+                    headers=headers,
+                )
+                if r.status_code == 200:
+                    result.extend(parse_manifest(".csproj", r.text))
     return result
 
 
@@ -74,6 +90,20 @@ def parse_manifest(filename: str, content: str) -> list[DependencySpec]:
             if name.lower() != "python":
                 result.append(("pypi", name, version))
         return result
+    if filename == ".csproj":
+        root = ET.fromstring(content)
+        result = []
+        for reference in root.iter():
+            if reference.tag.rsplit("}", 1)[-1] != "PackageReference":
+                continue
+            name = reference.attrib.get("Include") or reference.attrib.get("Update")
+            version = reference.attrib.get("Version")
+            if not version:
+                version_node = next((node for node in reference if node.tag.rsplit("}", 1)[-1] == "Version"), None)
+                version = version_node.text.strip() if version_node is not None and version_node.text else "unbounded"
+            if name:
+                result.append(("nuget", name, version))
+        return result
     result = []
     for line in content.splitlines():
         line = line.strip()
@@ -93,8 +123,8 @@ def _split_requirement(value: str) -> tuple[str, str]:
 async def package_meta(eco: str, name: str) -> tuple[str, int, int, bool, tuple[str, ...]]:
     url = (
         f"https://pypi.org/pypi/{name}/json"
-        if eco == "pypi"
-        else f"https://registry.npmjs.org/{name}"
+        if eco == "pypi" else f"https://registry.npmjs.org/{name}"
+        if eco == "npm" else f"https://api.nuget.org/v3-flatcontainer/{name.lower()}/index.json"
     )
     async with httpx.AsyncClient(timeout=12) as client:
         r = await client.get(url)
@@ -102,8 +132,8 @@ async def package_meta(eco: str, name: str) -> tuple[str, int, int, bool, tuple[
         data = r.json()
     latest = (
         data.get("info", {}).get("version")
-        if eco == "pypi"
-        else data.get("dist-tags", {}).get("latest", "unknown")
+        if eco == "pypi" else data.get("dist-tags", {}).get("latest", "unknown")
+        if eco == "npm" else (data.get("versions") or ["unknown"])[-1]
     )
     release = data.get("info", {}).get("release_urls", {}) if eco == "pypi" else {}
     dates = (

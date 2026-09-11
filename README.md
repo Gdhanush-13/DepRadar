@@ -30,8 +30,9 @@ The example badge is intentionally shown as `not scanned` until a repository sca
 | `requirements.txt` | PyPI | pinned and unpinned requirements |
 | `pyproject.toml` | PyPI | PEP 621 and Poetry dependencies |
 | `package.json` | npm | `dependencies` and `devDependencies` |
+| `*.csproj` | NuGet | XML `PackageReference` items |
 
-Up to 100 dependencies are included in a scan. Package metadata is read from PyPI or npm; the current adapter reports release freshness and basic upstream status.
+Up to 100 dependencies are included in a scan. Package metadata is read from PyPI, npm, or NuGet; the current adapter reports release freshness and basic upstream status.
 
 ## Score semantics
 
