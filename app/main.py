@@ -130,8 +130,8 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
             await db.flush()
         else:
             dep.current_version_required = required
-        latest_v, behind, days, archived, cves = await package_meta(eco, dep_name, required)
-        sig = DependencySignals(behind, days, archived, cves)
+        latest_v, behind, days, archived, cves, severities = await package_meta(eco, dep_name, required)
+        sig = DependencySignals(behind, days, archived, severities)
         deductions = dependency_deductions(sig)
         score = dependency_score(sig)
         if not dep.is_ignored:
@@ -146,6 +146,7 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
                 days_since_last_release=days,
                 is_archived_upstream=archived,
                 known_cves=list(cves),
+                cve_severities=list(severities),
                 points_deducted=100 - score,
                 lag_points=deductions["lag"], age_points=deductions["age"],
                 archived_points=deductions["archived"], cve_points=deductions["cves"],
@@ -207,7 +208,7 @@ async def set_dependency_ignored(
         if snap_dep is not None and not snap_dep.is_ignored:
             active_signals.append(DependencySignals(
                 snap.versions_behind, snap.days_since_last_release,
-                snap.is_archived_upstream, tuple(snap.known_cves or ())
+                snap.is_archived_upstream, tuple(snap.cve_severities or ())
             ))
     scan.risk_score = risk_score(active_signals)
     cache = await db.get(BadgeCache, item.full_name)

@@ -1,6 +1,12 @@
 import pytest
 
-from app.services import _split_requirement, _versions_behind, normalize_repo, parse_manifest
+from app.services import (
+    _split_requirement,
+    _versions_behind,
+    normalize_repo,
+    parse_manifest,
+    parse_osv_vulnerabilities,
+)
 
 
 def test_normalize_repo_accepts_url():
@@ -44,6 +50,24 @@ def test_parse_environment_markers_and_vcs_requirements():
 def test_parse_pip_compile_continuation_and_count_versions_behind():
     assert _split_requirement("Django==2.2.24 \\") == ("Django", "==2.2.24")
     assert _versions_behind("==2.2.24", ["2.2.24", "3.2.25", "4.2.20", "6.1.1"]) == 3
+
+
+def test_parse_osv_pypi_cvss_and_multiple_vulnerabilities():
+    ids, severities = parse_osv_vulnerabilities({
+        "vulns": [
+            {"id": "GHSA-one", "aliases": ["CVE-2024-0001"],
+             "database_specific": {"severity": "HIGH"}},
+            {"id": "GHSA-two", "aliases": [],
+             "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]},
+        ]
+    })
+    assert ids == ("CVE-2024-0001", "GHSA-two")
+    assert severities == ("HIGH", "CRITICAL")
+
+
+def test_parse_osv_missing_severity_defaults_to_medium():
+    _, severities = parse_osv_vulnerabilities({"vulns": [{"id": "GHSA-no-score"}]})
+    assert severities == ("MEDIUM",)
 
 
 def test_parse_package_json_dependencies():

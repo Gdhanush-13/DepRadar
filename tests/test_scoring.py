@@ -31,6 +31,11 @@ def test_cves():
     assert cve_penalty(("critical", "low")) == 20
 
 
+def test_multiple_vulnerabilities_accumulate_and_cap():
+    assert cve_penalty(("CRITICAL", "HIGH", "MEDIUM", "LOW")) == 38
+    assert cve_penalty(("CRITICAL", "CRITICAL", "CRITICAL")) == 45
+
+
 def test_aggregate():
     assert freshness_score([80, 90]) == 85 and freshness_score([]) == 100
 

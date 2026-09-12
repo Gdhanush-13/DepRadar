@@ -14,7 +14,7 @@ DepRadar is a Codecov-style dependency health dashboard for public GitHub reposi
 - Accepts `owner/repo` values and full GitHub repository URLs.
 - Reads Python, npm, and .NET dependency manifests.
 - Reports a 0–100 freshness score and a 0–100 risk score.
-- Shows package-level release age, version lag, archive status, CVE signals, and scoring deductions.
+- Shows package-level release age, version lag, archive status, OSV.dev CVE identifiers, severities, and scoring deductions.
 - Provides history, Markdown/JSON exports, comparison, and README badges.
 - Keeps unscanned repositories explicitly gray as `not scanned`.
 
@@ -27,11 +27,11 @@ DepRadar is a Codecov-style dependency health dashboard for public GitHub reposi
 | `package.json` | npm | `dependencies` and `devDependencies` |
 | `*.csproj` | NuGet | XML `PackageReference` items, including nested project files |
 
-Scans include at most 100 dependencies. Package metadata is fetched from PyPI, npm, and NuGet. A repository without a supported manifest returns a clear error; it is never reported as a successful empty scan.
+Scans include at most 100 dependencies. Package metadata is fetched from PyPI, npm, and NuGet; vulnerability records are queried from OSV.dev using exact package versions for PyPI and npm. A repository without a supported manifest returns a clear error; it is never reported as a successful empty scan.
 
 ## Scores
 
-Freshness is higher-is-better. Risk is lower-is-better. Dependency deductions can come from version lag, release age, archived upstream projects, and known CVE severity. The home-page scan progress indicator is only a loading hint and stops below 100% until the server returns results; the result page contains the authoritative score.
+Freshness is higher-is-better. Risk is lower-is-better. Dependency deductions can come from version lag, release age, archived upstream projects, and OSV vulnerability severity. Multiple vulnerabilities accumulate deductions up to the per-dependency cap. Records without structured severity default to medium. The home-page scan progress indicator is only a loading hint and stops below 100% until the server returns results; the result page contains the authoritative score.
 
 ## Local development
 

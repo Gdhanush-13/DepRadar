@@ -151,38 +151,118 @@ def _iso_days_old(value: str) -> int:
         return 0
 
 
-async def package_meta(eco: str, name: str, required: str = "unbounded") -> tuple[str, int, int, bool, tuple[str, ...]]:
+def _osv_version(required: str) -> str | None:
+    if required == "vcs":
+        return None
+    match = re.search(r"(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?)", required)
+    return match.group(1) if match else None
+
+
+def _vulnerability_severity(vulnerability: dict[str, Any]) -> str:
+    database_severity = str(vulnerability.get("database_specific", {}).get("severity", "")).upper()
+    if database_severity in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+        return database_severity
+    for item in vulnerability.get("severity", []):
+        score = str(item.get("score", ""))
+        if score.startswith("CVSS:3"):
+            if all(metric in score for metric in ("C:H", "I:H", "A:H")):
+                return "CRITICAL"
+            return "HIGH"
+        if score.startswith("AV:"):
+            return "HIGH"
+        match = re.search(r"(?:^|\s)(\d+(?:\.\d+)?)", score)
+        if match:
+            value = float(match.group(1))
+            return "CRITICAL" if value >= 9 else "HIGH" if value >= 7 else "MEDIUM" if value >= 4 else "LOW"
+    return "MEDIUM"
+
+
+def parse_osv_vulnerabilities(data: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    ids: list[str] = []
+    severities: list[str] = []
+    seen: set[str] = set()
+    for vulnerability in data.get("vulns", []):
+        aliases = vulnerability.get("aliases", [])
+        cve = next((alias for alias in aliases if alias.startswith("CVE-")), None)
+        identifier = cve or vulnerability.get("id")
+        if identifier and str(identifier) not in seen:
+            seen.add(str(identifier))
+            ids.append(str(identifier))
+            severities.append(_vulnerability_severity(vulnerability))
+    return tuple(ids), tuple(severities)
+
+
+async def _osv_lookup(
+    client: httpx.AsyncClient, ecosystem: str, name: str, required: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    version = _osv_version(required)
+    if version is None:
+        return (), ()
+    response = await client.post(
+        "https://api.osv.dev/v1/query",
+        json={"package": {"ecosystem": ecosystem, "name": name}, "version": version},
+    )
+    if response.status_code != 200:
+        return (), ()
+    return parse_osv_vulnerabilities(response.json())
+
+
+async def package_meta(
+    eco: str, name: str, required: str = "unbounded"
+) -> tuple[str, int, int, bool, tuple[str, ...], tuple[str, ...]]:
+    if eco not in {"pypi", "npm", "nuget"}:
+        raise ValueError(f"Unsupported ecosystem: {eco}")
     url = (
         f"https://pypi.org/pypi/{name}/json"
         if eco == "pypi" else f"https://registry.npmjs.org/{name}"
         if eco == "npm" else f"https://api.nuget.org/v3-flatcontainer/{name.lower()}/index.json"
     )
     async with httpx.AsyncClient(timeout=12) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        data = r.json()
-    versions: list[str] = (
-        list(data.get("releases", {}).keys())
-        if eco == "pypi" else list(data.get("versions", {}).keys())
-        if eco == "npm" else data.get("versions", [])
+        response = await client.get(url)
+        response.raise_for_status()
+        data = response.json()
+        versions: list[str] = (
+            list(data.get("releases", {}).keys())
+            if eco == "pypi" else list(data.get("versions", {}).keys())
+            if eco == "npm" else data.get("versions", [])
+        )
+        latest = (
+            data.get("info", {}).get("version")
+            if eco == "pypi" else data.get("dist-tags", {}).get("latest", "unknown")
+            if eco == "npm" else (data.get("versions") or ["unknown"])[-1]
+        )
+        if eco == "pypi":
+            dates = [
+                upload.get("upload_time_iso_8601", "")
+                for releases in data.get("releases", {}).values()
+                for upload in releases
+            ]
+            newest = max(dates, default="")
+            archived = bool(data.get("info", {}).get("yanked", False))
+            osv_ecosystem = "PyPI"
+        elif eco == "npm":
+            newest = data.get("time", {}).get(latest, "")
+            archived = False
+            osv_ecosystem = "npm"
+        else:
+            registration = await client.get(
+                f"https://api.nuget.org/v3/registration5-semver1/{name.lower()}/index.json"
+            )
+            registration.raise_for_status()
+            catalog = [
+                item.get("catalogEntry", {})
+                for page in registration.json().get("items", [])
+                for item in page.get("items", [])
+            ]
+            newest = max((item.get("published", "") for item in catalog), default="")
+            archived = False
+            osv_ecosystem = "NuGet"
+        cve_ids, cve_severities = await _osv_lookup(client, osv_ecosystem, name, required)
+    return (
+        latest or "unknown",
+        _versions_behind(required, versions),
+        _iso_days_old(newest),
+        archived,
+        cve_ids,
+        cve_severities,
     )
-    latest = (
-        data.get("info", {}).get("version")
-        if eco == "pypi" else data.get("dist-tags", {}).get("latest", "unknown")
-        if eco == "npm" else (data.get("versions") or ["unknown"])[-1]
-    )
-    if eco == "pypi":
-        dates = [upload.get("upload_time_iso_8601", "") for releases in data.get("releases", {}).values() for upload in releases]
-        newest = max(dates, default="")
-        archived = bool(data.get("info", {}).get("yanked", False))
-    elif eco == "npm":
-        newest = data.get("time", {}).get(latest, "")
-        archived = False
-    else:
-        async with httpx.AsyncClient(timeout=12) as client:
-            registration = await client.get(f"https://api.nuget.org/v3/registration5-semver1/{name.lower()}/index.json")
-        registration.raise_for_status()
-        catalog = [item.get("catalogEntry", {}) for page in registration.json().get("items", []) for item in page.get("items", [])]
-        newest = max((item.get("published", "") for item in catalog), default="")
-        archived = False
-    return latest or "unknown", _versions_behind(required, versions), _iso_days_old(newest), archived, ()

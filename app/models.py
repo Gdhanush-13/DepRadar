@@ -81,6 +81,7 @@ class DependencySnapshot(Base):
     is_archived_upstream: Mapped[bool] = mapped_column(Boolean, default=False)
     days_since_last_release: Mapped[int] = mapped_column(Integer, default=0)
     known_cves: Mapped[list] = mapped_column(JSON, default=list)
+    cve_severities: Mapped[list] = mapped_column(JSON, default=list)
     points_deducted: Mapped[float] = mapped_column(Float, default=0)
     lag_points: Mapped[float] = mapped_column(Float, default=0)
     age_points: Mapped[float] = mapped_column(Float, default=0)
