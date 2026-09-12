@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import tomllib
 import xml.etree.ElementTree as ET
@@ -13,6 +14,7 @@ from .config import settings
 DependencySpec = tuple[str, str, str]
 MAX_MANIFEST_DEPENDENCIES = 100
 MAX_METADATA_RESPONSE_BYTES = 5_000_000
+logger = logging.getLogger(__name__)
 
 
 def normalize_repo(value: str) -> tuple[str, str]:
@@ -292,8 +294,16 @@ async def package_meta(
         github_headers = {"Accept": "application/vnd.github+json"}
         if settings.github_token:
             github_headers["Authorization"] = f"Bearer {settings.github_token}"
-        archived = await _archive_status(client, source, github_headers)
-        cve_ids, cve_severities = await _osv_lookup(client, osv_ecosystem, name, required)
+        try:
+            archived = await _archive_status(client, source, github_headers)
+        except Exception as exc:
+            logger.warning("Archive lookup failed for %s/%s: %s", eco, name, exc)
+            archived = None
+        try:
+            cve_ids, cve_severities = await _osv_lookup(client, osv_ecosystem, name, required)
+        except Exception as exc:
+            logger.warning("OSV lookup failed for %s/%s: %s", eco, name, exc)
+            cve_ids, cve_severities = (), ()
     return (
         latest or "unknown",
         _versions_behind(required, versions),
