@@ -1,93 +1,85 @@
 # DepRadar
 
-DepRadar is a Codecov-style dependency health dashboard for public GitHub repositories. It scans supported manifests, compares package release freshness, calculates freshness and risk scores, and exposes an embeddable SVG badge.
+DepRadar is a Codecov-style dependency health dashboard for public GitHub repositories. It scans supported manifests, measures dependency freshness and upstream risk, and publishes an embeddable SVG badge.
 
 ## Live deployment
 
-- App: https://depradar-backend-dev.onrender.com
-- Health: https://depradar-backend-dev.onrender.com/healthz
-- Example badge: https://depradar-backend-dev.onrender.com/badge/Gdhanush-13/DepRadar.svg
-- API documentation: https://depradar-backend-dev.onrender.com/docs
+- Dashboard: <https://depradar-backend-dev.onrender.com>
+- Health check: <https://depradar-backend-dev.onrender.com/healthz>
+- API docs: <https://depradar-backend-dev.onrender.com/docs>
+- Example badge: <https://depradar-backend-dev.onrender.com/badge/Gdhanush-13/DepRadar.svg>
 
-The example badge is intentionally shown as `not scanned` until a repository scan completes. DepRadar never presents an unscanned repository as a score of zero.
+## What it does
 
-## Features
-
-- Responsive web UI for submitting `owner/repo` or a GitHub URL.
-- Freshness and risk scores with dependency-level details.
-- SVG badges for README files, with `?metric=freshness` or `?metric=risk`.
-- Scan history and a score trend page.
-- Expandable per-factor deduction explanations on every dependency row.
-- Markdown and JSON report downloads plus side-by-side comparison for scanned repositories.
-- Ownership-gated per-repository dependency ignore state; ignored rows remain visible and are excluded from the score.
-- JSON API for scores, history, scans, health, and scheduled rescans.
-- SQLite for local development and PostgreSQL for production.
+- Accepts `owner/repo` values and full GitHub repository URLs.
+- Reads Python, npm, and .NET dependency manifests.
+- Reports a 0–100 freshness score and a 0–100 risk score.
+- Shows package-level release age, version lag, archive status, CVE signals, and scoring deductions.
+- Provides history, Markdown/JSON exports, comparison, and README badges.
+- Keeps unscanned repositories explicitly gray as `not scanned`.
 
 ## Supported manifests
 
-| Manifest | Ecosystem | Fields read |
+| File | Ecosystem | Dependencies read |
 | --- | --- | --- |
-| `requirements.txt` | PyPI | pinned and unpinned requirements |
+| `requirements.txt` | PyPI | Requirement lines, pinned or unpinned |
 | `pyproject.toml` | PyPI | PEP 621 and Poetry dependencies |
 | `package.json` | npm | `dependencies` and `devDependencies` |
-| `*.csproj` | NuGet | XML `PackageReference` items |
+| `*.csproj` | NuGet | XML `PackageReference` items, including nested project files |
 
-Up to 100 dependencies are included in a scan. Package metadata is read from PyPI, npm, or NuGet; the current adapter reports release freshness and basic upstream status.
+Scans include at most 100 dependencies. Package metadata is fetched from PyPI, npm, and NuGet. A repository without a supported manifest returns a clear error; it is never reported as a successful empty scan.
 
-## Score semantics
+## Scores
 
-Freshness is a 0-100 score where higher is better. Risk is a 0-100 pressure score where lower is better. Badge colors use green for 80+, yellow for 50-79, and red below 50. A repository without a completed scan receives a gray `not scanned` badge.
+Freshness is higher-is-better. Risk is lower-is-better. Dependency deductions can come from version lag, release age, archived upstream projects, and known CVE severity. The home-page scan progress indicator is only a loading hint and stops below 100% until the server returns results; the result page contains the authoritative score.
 
-## Run locally
+## Local development
 
-```bash
+```powershell
 python -m venv .venv
-# Windows PowerShell
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 uvicorn app.main:app --reload
 ```
 
-The local default uses SQLite and an in-process Redis fallback. For the full container stack:
+Open <http://localhost:8000>. For a PostgreSQL and Redis development stack:
 
 ```bash
 docker compose up --build
 ```
 
-Open http://localhost:8000. Never commit `.env`; copy `.env.example` and keep production credentials in the hosting provider.
+Copy `.env.example` to `.env`. Never commit `.env` or production credentials.
 
 ## Configuration
 
-Required in production:
+| Variable | Required in production | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Yes | `postgresql+asyncpg://...` for PostgreSQL; SQLite is convenient locally |
+| `REDIS_URL` | Yes for provider integrations | Redis URL, including `rediss://` for TLS |
+| `JWT_SECRET` | Yes | Long random secret for future authenticated flows |
+| `APP_BASE_URL` | Yes | Public URL used in badge links |
+| `GITHUB_TOKEN` | Recommended | Raises GitHub API rate limits; read-only public access is sufficient |
+| `INTERNAL_RESCAN_KEY` | Yes for nightly rescan | Secret sent by the scheduled workflow |
 
-| Variable | Purpose |
-| --- | --- |
-| `DATABASE_URL` | PostgreSQL URL; use the `postgresql+asyncpg://` scheme |
-| `REDIS_URL` | Redis connection URL, including `rediss://` when TLS is required |
-| `JWT_SECRET` | Long random signing secret |
-| `APP_BASE_URL` | Public application URL used in badge links |
-
-Optional variables include `GITHUB_TOKEN` (recommended in production to avoid GitHub API rate limits) and `INTERNAL_RESCAN_KEY` for the protected rescan endpoint.
-
-## API and routes
+## Routes and API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/` | Web dashboard |
-| `POST` | `/scan` | Form-based repository scan |
-| `GET` | `/badge/{owner}/{repo}.svg` | Freshness badge |
-| `GET` | `/badge/{owner}/{repo}.svg?metric=risk` | Risk badge |
-| `GET` | `/history/{owner}/{repo}` | Web scan history |
-| `GET` | `/methodology` | Plain-language scoring explanation |
-| `GET` | `/compare?a=OWNER/REPO&b=OWNER/REPO` | Compare two completed scans |
-| `GET` | `/api/v1/repos/{owner}/{repo}/export.md` | Download Markdown report |
-| `GET` | `/api/v1/repos/{owner}/{repo}/export.json` | Download structured JSON report |
-| `GET` | `/api/v1/repos/{owner}/{repo}/score` | Latest score JSON |
-| `GET` | `/api/v1/repos/{owner}/{repo}/history` | History JSON |
-| `POST` | `/api/v1/repos/{owner}/{repo}/scan` | Programmatic scan |
+| `GET` | `/` | Dashboard and scan form |
+| `POST` | `/scan` | Browser scan |
+| `GET` | `/badge/{owner}/{repo}.svg` | Freshness badge (`?metric=risk` for risk) |
+| `GET` | `/history/{owner}/{repo}` | History page |
+| `GET` | `/methodology` | Scoring explanation |
+| `GET` | `/compare?a=OWNER/REPO&b=OWNER/REPO` | Side-by-side comparison; missing scans are started automatically |
+| `POST` | `/api/v1/repos/{owner}/{repo}/scan` | API scan |
+| `GET` | `/api/v1/repos/{owner}/{repo}/score` | Latest scores |
+| `GET` | `/api/v1/repos/{owner}/{repo}/history` | Score history JSON |
+| `GET` | `/api/v1/repos/{owner}/{repo}/export.json` | Structured report |
+| `GET` | `/api/v1/repos/{owner}/{repo}/export.md` | Markdown report |
+| `POST` | `/api/v1/internal/rescan-all` | Protected nightly rescan endpoint |
 | `GET` | `/healthz` | Database health check |
 
-Embed a badge in another repository with:
+Badge example:
 
 ```markdown
 [![DepRadar](https://depradar-backend-dev.onrender.com/badge/OWNER/REPO.svg)](https://depradar-backend-dev.onrender.com/)
@@ -95,9 +87,9 @@ Embed a badge in another repository with:
 
 ## Deployment
 
-The production service is deployed on Render from the `main` branch using the repository Dockerfile. Neon provides PostgreSQL and Upstash provides Redis. Render health checks use `/healthz`, and pushes to `main` trigger a new deployment.
+The live service is deployed from `main` on Render using the repository `Dockerfile`. Neon PostgreSQL and Upstash Redis provide production data services. Set the variables above in Render; do not store their values in GitHub. Every push to `main` runs CI and triggers the Render deployment integration.
 
-A public scan requires the target repository to be accessible to GitHub's API. Configure a GitHub token in Render for reliable production use; do not put tokens or database URLs in source control.
+The nightly GitHub Actions workflow calls `/api/v1/internal/rescan-all` with `APP_BASE_URL` and `INTERNAL_RESCAN_KEY` repository secrets. The deployed service does not include a separate worker process; this keeps scheduled work in the already configured workflow.
 
 ## Quality checks
 
@@ -107,11 +99,13 @@ python -m mypy app
 python -m pytest --cov=app --cov-report=term-missing
 ```
 
-The current test suite covers web routes, badge states, the scan-to-badge flow, manifest parsers, scoring, and the protected internal endpoint.
+## Contributing
+
+Keep changes focused, add tests for behavior changes, and run all three quality checks before opening a pull request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Roadmap
 
-The product backlog includes a full GitHub OAuth registration UI, SMTP score-drop alerts, public leaderboard/gallery, organization dashboards, Slack/webhook notifications, and Cargo/Go module adapters. These are intentionally separate from the public anonymous scan path so credentials and ownership are never inferred.
+OAuth registration UI, SMTP alerts, organization dashboards, public galleries, Slack/webhook notifications, and Cargo/Go adapters remain intentionally unimplemented. No partial code paths for those features are shipped.
 
 ## License
 

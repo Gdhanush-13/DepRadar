@@ -10,13 +10,14 @@ dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0", 
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.11"]
-worker = ["celery[redis]>=5.4", "asyncpg>=0.29"]
+production = ["asyncpg>=0.29"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
+[tool.ruff.lint]
 ignore = ["B008", "BLE001"]
 [tool.mypy]
 strict = false
