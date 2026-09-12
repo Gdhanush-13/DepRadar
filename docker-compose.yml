@@ -5,10 +5,8 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://depradar:depradar@postgres/depradar
-      REDIS_URL: redis://redis:6379/0
     depends_on:
       - postgres
-      - redis
   postgres:
     image: postgres:16-alpine
     environment:
@@ -17,7 +15,5 @@ services:
       POSTGRES_DB: depradar
     volumes:
       - pgdata:/var/lib/postgresql/data
-  redis:
-    image: redis:7-alpine
 volumes:
   pgdata:

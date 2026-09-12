@@ -40,20 +40,19 @@ def dependency_deductions(s: DependencySignals) -> dict[str, float]:
 
 
 def freshness_score(scores: list[float]) -> float:
-    return round(sum(scores) / len(scores), 2) if scores else 100.0
+    return round(sum(scores) / len(scores), 2) if scores else 0.0
 
 
 def risk_score(signals: list[DependencySignals]) -> float:
     if not signals:
         return 0.0
-    raw = sum(
-        min(
-            100,
-            cve_penalty(s.cve_severities) * 1.5
-            + (30 if s.archived else 0)
-            + min(40, s.versions_behind * 3)
-            + min(20, s.days_since_last_release / 30),
-        )
-        for s in signals
-    ) / len(signals)
-    return round(min(100.0, raw), 2)
+    individual = [min(
+        100,
+        cve_penalty(s.cve_severities) * 1.5
+        + (30 if s.archived else 0)
+        + min(40, s.versions_behind * 3)
+        + min(20, s.days_since_last_release / 30),
+    ) for s in signals]
+    average = sum(individual) / len(individual)
+    top_outlier = max(individual)
+    return round(min(100.0, max(average, top_outlier)), 2)

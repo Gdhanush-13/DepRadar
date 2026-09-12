@@ -48,6 +48,8 @@ async def init_db() -> None:
             ("dependency_snapshots", ("archived_points", "FLOAT DEFAULT 0")),
             ("dependency_snapshots", ("cve_points", "FLOAT DEFAULT 0")),
             ("dependency_snapshots", ("cve_severities", "JSON DEFAULT '[]'")),
+            ("scans", ("unresolved_count", "INTEGER DEFAULT 0")),
+            ("dependency_snapshots", ("resolution_status", "VARCHAR(30) DEFAULT 'resolved'")),
         ):
             clause = "IF NOT EXISTS " if connection.dialect.name != "sqlite" else ""
             statement = f"ALTER TABLE {table} ADD COLUMN {clause}{column} {definition}"

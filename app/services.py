@@ -207,9 +207,30 @@ async def _osv_lookup(
     return parse_osv_vulnerabilities(response.json())
 
 
+def _github_source(value: Any) -> tuple[str, str] | None:
+    if isinstance(value, dict):
+        value = value.get("url") or value.get("directory")
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", value)
+    if not match:
+        return None
+    return match.group(1), match.group(2).removesuffix(".git")
+
+
+async def _archive_status(client: httpx.AsyncClient, source: Any, headers: dict[str, str]) -> bool | None:
+    github = _github_source(source)
+    if not github:
+        return None
+    response = await client.get(f"https://api.github.com/repos/{github[0]}/{github[1]}", headers=headers)
+    if response.status_code != 200:
+        return None
+    return bool(response.json().get("archived", False))
+
+
 async def package_meta(
     eco: str, name: str, required: str = "unbounded"
-) -> tuple[str, int, int, bool, tuple[str, ...], tuple[str, ...]]:
+) -> tuple[str, int, int, bool | None, tuple[str, ...], tuple[str, ...]]:
     if eco not in {"pypi", "npm", "nuget"}:
         raise ValueError(f"Unsupported ecosystem: {eco}")
     url = (
@@ -238,11 +259,13 @@ async def package_meta(
                 for upload in releases
             ]
             newest = max(dates, default="")
-            archived = bool(data.get("info", {}).get("yanked", False))
+            info = data.get("info", {})
+            sources = list((info.get("project_urls") or {}).values()) + [info.get("home_page")]
+            source = next((item for item in sources if _github_source(item)), None)
             osv_ecosystem = "PyPI"
         elif eco == "npm":
             newest = data.get("time", {}).get(latest, "")
-            archived = False
+            source = data.get("repository")
             osv_ecosystem = "npm"
         else:
             registration = await client.get(
@@ -255,8 +278,13 @@ async def package_meta(
                 for item in page.get("items", [])
             ]
             newest = max((item.get("published", "") for item in catalog), default="")
-            archived = False
+            latest_catalog: dict[str, Any] = next((item for item in catalog if item.get("version") == latest), {})
+            source = latest_catalog.get("repository") or latest_catalog.get("projectUrl")
             osv_ecosystem = "NuGet"
+        github_headers = {"Accept": "application/vnd.github+json"}
+        if settings.github_token:
+            github_headers["Authorization"] = f"Bearer {settings.github_token}"
+        archived = await _archive_status(client, source, github_headers)
         cve_ids, cve_severities = await _osv_lookup(client, osv_ecosystem, name, required)
     return (
         latest or "unknown",

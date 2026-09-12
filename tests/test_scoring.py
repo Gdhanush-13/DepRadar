@@ -37,8 +37,14 @@ def test_multiple_vulnerabilities_accumulate_and_cap():
 
 
 def test_aggregate():
-    assert freshness_score([80, 90]) == 85 and freshness_score([]) == 100
+    assert freshness_score([80, 90]) == 85 and freshness_score([]) == 0
 
 
 def test_risk():
     assert risk_score([DependencySignals(archived=True, cve_severities=("HIGH",))]) == 48
+
+
+def test_risk_keeps_a_dangerous_outlier_visible():
+    signals = [DependencySignals() for _ in range(39)]
+    signals.append(DependencySignals(archived=True, cve_severities=("CRITICAL",)))
+    assert risk_score(signals) > 20

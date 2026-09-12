@@ -1,6 +1,7 @@
 """Store OSV severity alongside vulnerability identifiers."""
+from sqlalchemy import JSON, Column
+
 from alembic import op
-from sqlalchemy import Column, JSON
 
 revision = "0003_osv_severity"
 down_revision = "0002_scoring_transparency"

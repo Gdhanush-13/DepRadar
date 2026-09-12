@@ -42,7 +42,7 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload
 ```
 
-Open <http://localhost:8000>. For a PostgreSQL and Redis development stack:
+Open <http://localhost:8000>. For a PostgreSQL development stack:
 
 ```bash
 docker compose up --build
@@ -55,8 +55,8 @@ Copy `.env.example` to `.env`. Never commit `.env` or production credentials.
 | Variable | Required in production | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | `postgresql+asyncpg://...` for PostgreSQL; SQLite is convenient locally |
-| `REDIS_URL` | Yes for provider integrations | Redis URL, including `rediss://` for TLS |
 | `JWT_SECRET` | Yes | Long random secret for future authenticated flows |
+| `DEPRADAR_ENV` | Yes on Render | Set to `production` to reject placeholder secrets |
 | `APP_BASE_URL` | Yes | Public URL used in badge links |
 | `GITHUB_TOKEN` | Recommended | Raises GitHub API rate limits; read-only public access is sufficient |
 | `INTERNAL_RESCAN_KEY` | Yes for nightly rescan | Secret sent by the scheduled workflow |
@@ -87,7 +87,7 @@ Badge example:
 
 ## Deployment
 
-The live service is deployed from `main` on Render using the repository `Dockerfile`. Neon PostgreSQL and Upstash Redis provide production data services. Set the variables above in Render; do not store their values in GitHub. Every push to `main` runs CI and triggers the Render deployment integration.
+The live service is deployed from `main` on Render using the repository `Dockerfile`. Neon PostgreSQL provides production data. Redis is not required by the current application and is intentionally not part of the deployment. Set the variables above in Render; do not store their values in GitHub. Every push to `main` runs CI and triggers the Render deployment integration.
 
 The nightly GitHub Actions workflow calls `/api/v1/internal/rescan-all` with `APP_BASE_URL` and `INTERNAL_RESCAN_KEY` repository secrets. The deployed service does not include a separate worker process; this keeps scheduled work in the already configured workflow.
 

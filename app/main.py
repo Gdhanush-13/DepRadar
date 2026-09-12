@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
@@ -7,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import settings
+from .config import settings, validate_production_config
 from .db import get_db, init_db
 from .models import BadgeCache, Dependency, DependencySnapshot, Repository, Scan
 from .scoring import (
@@ -22,6 +24,7 @@ from .services import github_repo, manifest, normalize_repo, package_meta
 app = FastAPI(title="DepRadar", version="1.0.0", description="Dependency freshness and risk radar")
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+logger = logging.getLogger(__name__)
 
 
 @app.middleware("http")
@@ -38,6 +41,7 @@ async def inject_design_system(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup() -> None:
+    validate_production_config()
     await init_db()
 
 
@@ -75,10 +79,11 @@ async def dependency_rows(scan_id: int, db: AsyncSession) -> list[dict[str, obje
         "name": dep.name, "ecosystem": dep.ecosystem, "required": dep.current_version_required,
         "latest": snap.latest_version, "behind": snap.versions_behind,
         "days": snap.days_since_last_release, "archived": snap.is_archived_upstream,
-        "cves": snap.known_cves, "score": max(0, 100 - snap.points_deducted),
+        "resolution_status": snap.resolution_status, "cves": snap.known_cves,
+        "score": max(0, 100 - snap.points_deducted) if snap.resolution_status == "resolved" else None,
         "ignored": dep.is_ignored,
         "deductions": {"lag": snap.lag_points, "age": snap.age_points,
-                        "archived": snap.archived_points, "cves": snap.cve_points},
+                       "archived": snap.archived_points, "cves": snap.cve_points},
     } for dep, snap in rows.all()]
 
 
@@ -92,21 +97,18 @@ async def latest(repo: Repository, db: AsyncSession):
 @app.get("/healthz")
 async def healthz(db: AsyncSession = Depends(get_db)):
     await db.execute(text("SELECT 1"))
-    return {"status": "ok", "database": "ok", "redis": "optional-local-fallback"}
+    return {"status": "ok", "database": "ok"}
 
 
 async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
+    scan_started = datetime.now(UTC)
     info = await github_repo(owner, name)
-    repo = (
-        await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{name}"))
-    ).scalar_one_or_none()
+    repo = (await db.execute(
+        select(Repository).where(Repository.full_name == f"{owner}/{name}")
+    )).scalar_one_or_none()
     if not repo:
-        repo = Repository(
-            owner=owner,
-            name=name,
-            full_name=f"{owner}/{name}",
-            default_branch=info.get("default_branch", "main"),
-        )
+        repo = Repository(owner=owner, name=name, full_name=f"{owner}/{name}",
+                          default_branch=info.get("default_branch", "main"))
         db.add(repo)
         await db.flush()
     scan = Scan(repository_id=repo.id, status="running", commit_sha_scanned=info.get("pushed_at"))
@@ -114,14 +116,31 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
     await db.flush()
     deps = await manifest(owner, name, repo.default_branch)
     if not deps:
-        scan.status = "failed"
+        scan.status = "no_dependencies"
+        scan.finished_at = datetime.now(UTC)
+        logger.info("scan completed repo=%s/%s status=%s duration=%.2fs", owner, name,
+                    scan.status, (scan.finished_at - scan_started).total_seconds())
         await db.commit()
-        raise ValueError("No supported manifest detected")
-    signals = []
-    scores = []
-    for eco, dep_name, required in deps[:100]:
+        return scan
+
+    signals: list[DependencySignals] = []
+    scores: list[float] = []
+    semaphore = asyncio.Semaphore(10)
+
+    async def resolve(item: tuple[str, str, str]):
+        async with semaphore:
+            try:
+                return True, await package_meta(*item)
+            except Exception as exc:
+                logger.warning("Dependency lookup failed for %s/%s: %s", item[0], item[1], exc)
+                return False, exc
+
+    selected = deps[:100]
+    metadata = await asyncio.gather(*(resolve(item) for item in selected))
+    for (eco, dep_name, required), (ok, result) in zip(selected, metadata):
         dep = (await db.execute(select(Dependency).where(
-            Dependency.repository_id == repo.id, Dependency.ecosystem == eco, Dependency.name == dep_name
+            Dependency.repository_id == repo.id, Dependency.ecosystem == eco,
+            Dependency.name == dep_name
         ).order_by(Dependency.id.desc()).limit(1))).scalar_one_or_none()
         if dep is None:
             dep = Dependency(repository_id=repo.id, ecosystem=eco, name=dep_name,
@@ -130,40 +149,50 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
             await db.flush()
         else:
             dep.current_version_required = required
-        latest_v, behind, days, archived, cves, severities = await package_meta(eco, dep_name, required)
-        sig = DependencySignals(behind, days, archived, severities)
-        deductions = dependency_deductions(sig)
-        score = dependency_score(sig)
+
+        if not ok:
+            scan.unresolved_count += 1
+            db.add(DependencySnapshot(
+                scan_id=scan.id, dependency_id=dep.id, latest_version="unavailable",
+                # Older deployed schemas made this column non-nullable; the
+                # resolution status still exposes archive state as unknown.
+                is_archived_upstream=False, resolution_status="unresolved",
+            ))
+            continue
+
+        latest_v, behind, days, archived, cves, severities = result
+        signal = DependencySignals(behind, days, archived is True, severities)
+        deductions = dependency_deductions(signal)
+        item_score = dependency_score(signal)
+        db.add(DependencySnapshot(
+            scan_id=scan.id, dependency_id=dep.id, latest_version=latest_v,
+            versions_behind=behind, days_since_last_release=days,
+            is_archived_upstream=archived, known_cves=list(cves),
+            cve_severities=list(severities), resolution_status="resolved",
+            points_deducted=100 - item_score, lag_points=deductions["lag"],
+            age_points=deductions["age"], archived_points=deductions["archived"],
+            cve_points=deductions["cves"],
+        ))
         if not dep.is_ignored:
-            signals.append(sig)
-            scores.append(score)
-        db.add(
-            DependencySnapshot(
-                scan_id=scan.id,
-                dependency_id=dep.id,
-                latest_version=latest_v,
-                versions_behind=behind,
-                days_since_last_release=days,
-                is_archived_upstream=archived,
-                known_cves=list(cves),
-                cve_severities=list(severities),
-                points_deducted=100 - score,
-                lag_points=deductions["lag"], age_points=deductions["age"],
-                archived_points=deductions["archived"], cve_points=deductions["cves"],
-            )
-        )
-    scan.freshness_score = freshness_score(scores)
-    scan.risk_score = risk_score(signals)
-    scan.status = "complete"
+            signals.append(signal)
+            scores.append(item_score)
+
+    scan.status = "complete" if scores else "no_dependencies"
+    scan.freshness_score = freshness_score(scores) if scores else None
+    scan.risk_score = risk_score(signals) if signals else None
     scan.finished_at = datetime.now(UTC)
+    logger.info("scan completed repo=%s/%s status=%s dependencies=%d unresolved=%d duration=%.2fs",
+                owner, name, scan.status, len(selected), scan.unresolved_count,
+                (scan.finished_at - scan_started).total_seconds())
     repo.last_scanned_at = scan.finished_at
     cache = await db.get(BadgeCache, repo.full_name)
-    body = badge_svg("DepRadar", f"{scan.freshness_score:.0f}", score_color(scan.freshness_score or 0))
-    if cache is None:
-        cache = BadgeCache(repo_full_name=repo.full_name, svg_body=body, score=scan.freshness_score or 0)
-        db.add(cache)
-    else:
-        cache.svg_body, cache.score, cache.generated_at = body, scan.freshness_score or 0, datetime.now(UTC)
+    if scan.status == "complete":
+        body = badge_svg("DepRadar", f"{scan.freshness_score:.0f}", score_color(scan.freshness_score or 0))
+        if cache is None:
+            db.add(BadgeCache(repo_full_name=repo.full_name, svg_body=body,
+                              score=scan.freshness_score or 0))
+        else:
+            cache.svg_body, cache.score, cache.generated_at = body, scan.freshness_score or 0, datetime.now(UTC)
     await db.commit()
     return scan
 
@@ -183,11 +212,15 @@ async def trigger_scan(owner: str, repo: str, db: AsyncSession = Depends(get_db)
 @app.post("/api/v1/repos/{owner}/{repo}/dependencies/{dependency}/ignore")
 async def set_dependency_ignored(
     owner: str, repo: str, dependency: str, ignored: bool = Query(...),
-    x_user_id: int | None = Header(default=None), db: AsyncSession = Depends(get_db),
+    x_internal_key: str | None = Header(default=None), db: AsyncSession = Depends(get_db),
 ):
-    item = (await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))).scalar_one_or_none()
-    if not item or not item.registered_by_user_id or x_user_id != item.registered_by_user_id:
-        raise HTTPException(401, "Only the user who registered this repository can change ignore state")
+    if x_internal_key != settings.internal_rescan_key:
+        raise HTTPException(401, "Invalid internal key")
+    item = (await db.execute(select(Repository).where(
+        Repository.full_name == f"{owner}/{repo}"
+    ))).scalar_one_or_none()
+    if not item:
+        raise HTTPException(404, "Repository has not been scanned")
     dep = (await db.execute(select(Dependency).where(
         Dependency.repository_id == item.id, Dependency.name == dependency
     ))).scalar_one_or_none()
@@ -195,29 +228,30 @@ async def set_dependency_ignored(
     if not dep or not scan:
         raise HTTPException(404, "Dependency or completed scan not found")
     dep.is_ignored = ignored
-    snapshots = (await db.execute(select(DependencySnapshot).where(DependencySnapshot.scan_id == scan.id))).scalars().all()
-    active = []
+    snapshots = (await db.execute(
+        select(DependencySnapshot).where(DependencySnapshot.scan_id == scan.id)
+    )).scalars().all()
+    active_scores: list[float] = []
+    active_signals: list[DependencySignals] = []
     for snap in snapshots:
         snap_dep = await db.get(Dependency, snap.dependency_id)
-        if snap_dep is not None and not snap_dep.is_ignored:
-            active.append(max(0, 100 - snap.points_deducted))
-    scan.freshness_score = freshness_score(active)
-    active_signals = []
-    for snap in snapshots:
-        snap_dep = await db.get(Dependency, snap.dependency_id)
-        if snap_dep is not None and not snap_dep.is_ignored:
+        if snap_dep is not None and not snap_dep.is_ignored and snap.resolution_status == "resolved":
+            active_scores.append(max(0, 100 - snap.points_deducted))
             active_signals.append(DependencySignals(
                 snap.versions_behind, snap.days_since_last_release,
-                snap.is_archived_upstream, tuple(snap.cve_severities or ())
+                snap.is_archived_upstream is True, tuple(snap.cve_severities or ())
             ))
-    scan.risk_score = risk_score(active_signals)
+    scan.status = "complete" if active_scores else "no_dependencies"
+    scan.freshness_score = freshness_score(active_scores) if active_scores else None
+    scan.risk_score = risk_score(active_signals) if active_signals else None
     cache = await db.get(BadgeCache, item.full_name)
-    if cache:
+    if cache and scan.freshness_score is not None:
         cache.score = scan.freshness_score
         cache.svg_body = badge_svg("DepRadar", f"{scan.freshness_score:.0f}", score_color(scan.freshness_score))
     await db.commit()
     return {"repository": item.full_name, "dependency": dependency, "ignored": ignored,
-            "freshness_score": scan.freshness_score}
+            "freshness_score": scan.freshness_score, "risk_score": scan.risk_score,
+            "status": scan.status}
 
 
 @app.post("/api/v1/internal/rescan-all")
@@ -305,6 +339,11 @@ async def badge(
         await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))
     ).scalar_one_or_none()
     scan = await latest(item, db) if item else None
+    if scan and scan.status == "no_dependencies":
+        return Response(
+            badge_svg("DepRadar", "no dependencies", "#64748b"), media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
     value = (scan.risk_score if metric == "risk" else scan.freshness_score) if scan else None
     if value is None:
         return Response(
@@ -340,7 +379,9 @@ async def methodology(request: Request):
 async def scan_payload(repo: str, scan: Scan, dependencies: list[dict[str, object]]) -> dict[str, object]:
     return {"repository": repo, "status": scan.status, "freshness_score": scan.freshness_score,
             "risk_score": scan.risk_score, "scanned_at": scan.finished_at,
-            "commit_sha_scanned": scan.commit_sha_scanned, "dependencies": dependencies}
+            "commit_sha_scanned": scan.commit_sha_scanned,
+            "unresolved_count": scan.unresolved_count,
+            "dependencies": dependencies}
 
 
 @app.get("/api/v1/repos/{owner}/{repo}/export.json")
@@ -359,10 +400,15 @@ async def export_markdown(owner: str, repo: str, db: AsyncSession = Depends(get_
     if not item or not scan:
         raise HTTPException(404, "Repository has not been scanned")
     deps = await dependency_rows(scan.id, db)
-    lines = [f"# DepRadar report: {item.full_name}", "", f"- Freshness: {scan.freshness_score:.2f}",
-             f"- Risk: {scan.risk_score:.2f}", f"- Scanned: {scan.finished_at}",
+    freshness = f"{scan.freshness_score:.2f}" if scan.freshness_score is not None else "no dependencies"
+    risk = f"{scan.risk_score:.2f}" if scan.risk_score is not None else "no dependencies"
+    lines = [f"# DepRadar report: {item.full_name}", "", f"- Freshness: {freshness}",
+             f"- Risk: {risk}", f"- Unresolved dependencies: {scan.unresolved_count}", f"- Scanned: {scan.finished_at}",
              f"- Commit: `{scan.commit_sha_scanned or 'unknown'}`", "", "| Dependency | Required | Latest | Score | State |", "| --- | --- | --- | ---: | --- |"]
-    lines += [f"| {d['name']} | {d['required']} | {d['latest']} | {d['score']:.0f} | {'ignored' if d['ignored'] else 'counted'} |" for d in deps]
+    for dep in deps:
+        dep_score = f"{dep['score']:.0f}" if dep['score'] is not None else "n/a"
+        state = "ignored" if dep["ignored"] else dep["resolution_status"]
+        lines.append(f"| {dep['name']} | {dep['required']} | {dep['latest']} | {dep_score} | {state} |")
     return Response("\n".join(lines) + "\n", media_type="text/markdown",
                     headers={"Content-Disposition": f'attachment; filename="{owner}-{repo}-depradar.md"'})
 

@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, init_db
 from app.main import app, risk_color, scan_repo
-from app.models import Dependency, DependencySnapshot, Repository, Scan, User
+from app.models import Dependency, DependencySnapshot, Repository, Scan
 
 
 @pytest.mark.asyncio
@@ -132,7 +132,8 @@ async def test_methodology_exports_and_comparison():
             db.add(scan)
             await db.flush()
             db.add(DependencySnapshot(scan_id=scan.id, dependency_id=dep.id, latest_version="3",
-                                      points_deducted=10, lag_points=8, age_points=2))
+                                      is_archived_upstream=False, points_deducted=10,
+                                      lag_points=8, age_points=2))
             repos.append(repo)
         await db.commit()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -151,10 +152,7 @@ async def test_registered_dependency_ignore_recalculates_score():
     await init_db()
     suffix = uuid4().hex[:8]
     async with SessionLocal() as db:
-        user = User(github_id=f"ignore-user-{suffix}", username=f"ignore-user-{suffix}")
-        db.add(user)
-        await db.flush()
-        repo = Repository(owner="ignore", name=suffix, full_name=f"ignore/{suffix}", registered_by_user_id=user.id)
+        repo = Repository(owner="ignore", name=suffix, full_name=f"ignore/{suffix}")
         db.add(repo)
         await db.flush()
         dep = Dependency(repository_id=repo.id, ecosystem="pypi", name="pytest", current_version_required="1")
@@ -163,15 +161,17 @@ async def test_registered_dependency_ignore_recalculates_score():
         scan = Scan(repository_id=repo.id, status="complete", freshness_score=50, risk_score=20)
         db.add(scan)
         await db.flush()
-        db.add(DependencySnapshot(scan_id=scan.id, dependency_id=dep.id, points_deducted=50))
+        db.add(DependencySnapshot(scan_id=scan.id, dependency_id=dep.id,
+                                  is_archived_upstream=False, points_deducted=50))
         await db.commit()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         denied = await client.post(f"/api/v1/repos/ignore/{suffix}/dependencies/pytest/ignore?ignored=true")
         changed = await client.post(f"/api/v1/repos/ignore/{suffix}/dependencies/pytest/ignore?ignored=true",
-                                    headers={"X-User-ID": str(user.id)})
+                                    headers={"X-Internal-Key": "dev-internal-key-change-me"})
         score = await client.get(f"/api/v1/repos/ignore/{suffix}/score")
         badge = await client.get(f"/badge/ignore/{suffix}.svg")
     assert denied.status_code == 401
     assert changed.status_code == 200 and changed.json()["ignored"] is True
-    assert score.json()["freshness_score"] == 100 and score.json()["risk_score"] == 0
-    assert 'aria-label="DepRadar: 100"' in badge.text
+    assert score.json()["status"] == "no_dependencies"
+    assert score.json()["freshness_score"] is None and score.json()["risk_score"] is None
+    assert "no dependencies" in badge.text
