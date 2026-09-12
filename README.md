@@ -25,7 +25,7 @@ DepRadar is a Codecov-style dependency health dashboard for public GitHub reposi
 | `requirements.txt` | PyPI | Requirement lines, pinned or unpinned |
 | `pyproject.toml` | PyPI | PEP 621 and Poetry dependencies |
 | `package.json` | npm | `dependencies` and `devDependencies` |
-| `*.csproj` | NuGet | XML `PackageReference` items, including nested project files |
+| `*.csproj` | NuGet | XML `PackageReference` items, including nested project files; latest metadata comes from NuGet registration |
 
 Scans include at most 100 dependencies. Package metadata is fetched from PyPI, npm, and NuGet; vulnerability records are queried from OSV.dev using exact package versions for PyPI and npm. A repository without a supported manifest returns a clear error; it is never reported as a successful empty scan.
 

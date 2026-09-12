@@ -4,9 +4,18 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from app.config import settings, validate_production_config
 from app.db import SessionLocal, init_db
 from app.main import app, risk_color, scan_repo
 from app.models import Dependency, DependencySnapshot, Repository, Scan
+
+
+def test_production_configuration_rejects_placeholder_secrets(monkeypatch):
+    monkeypatch.setattr(settings, "depradar_env", "production")
+    monkeypatch.setattr(settings, "jwt_secret", "dev-secret-change-me")
+    monkeypatch.setattr(settings, "internal_rescan_key", "dev-internal-key-change-me")
+    with pytest.raises(RuntimeError, match="JWT_SECRET.*INTERNAL_RESCAN_KEY"):
+        validate_production_config()
 
 
 @pytest.mark.asyncio
