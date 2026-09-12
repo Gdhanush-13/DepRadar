@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from packaging.version import InvalidVersion, Version
 
 from .config import settings
 
@@ -114,13 +115,35 @@ def parse_manifest(filename: str, content: str) -> list[DependencySpec]:
 
 
 def _split_requirement(value: str) -> tuple[str, str]:
+    # pip-compile uses a trailing backslash for continued hash lines.
+    value = value.split("\\", 1)[0].split(";", 1)[0].strip()
     match = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", value)
     if not match:
         return value, "unbounded"
     return match.group(1), match.group(2) or "unbounded"
 
 
-async def package_meta(eco: str, name: str) -> tuple[str, int, int, bool, tuple[str, ...]]:
+def _versions_behind(required: str, versions: list[str]) -> int:
+    match = re.search(r"(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?)", required)
+    if not match:
+        return 0
+    try:
+        current = Version(match.group(1))
+        return min(100, sum(Version(candidate) > current for candidate in versions))
+    except InvalidVersion:
+        return 0
+
+
+def _iso_days_old(value: str) -> int:
+    if not value:
+        return 0
+    try:
+        return max(0, (datetime.now(UTC) - datetime.fromisoformat(value)).days)
+    except ValueError:
+        return 0
+
+
+async def package_meta(eco: str, name: str, required: str = "unbounded") -> tuple[str, int, int, bool, tuple[str, ...]]:
     url = (
         f"https://pypi.org/pypi/{name}/json"
         if eco == "pypi" else f"https://registry.npmjs.org/{name}"
@@ -130,19 +153,28 @@ async def package_meta(eco: str, name: str) -> tuple[str, int, int, bool, tuple[
         r = await client.get(url)
         r.raise_for_status()
         data = r.json()
+    versions: list[str] = (
+        list(data.get("releases", {}).keys())
+        if eco == "pypi" else list(data.get("versions", {}).keys())
+        if eco == "npm" else data.get("versions", [])
+    )
     latest = (
         data.get("info", {}).get("version")
         if eco == "pypi" else data.get("dist-tags", {}).get("latest", "unknown")
         if eco == "npm" else (data.get("versions") or ["unknown"])[-1]
     )
-    release = data.get("info", {}).get("release_urls", {}) if eco == "pypi" else {}
-    dates = (
-        [x.get("upload_time_iso_8601", "") for values in release.values() for x in values]
-        if release
-        else []
-    )
-    days = 0
-    if dates:
-        newest = max(dates).replace("Z", "+00:00")
-        days = max(0, (datetime.now(UTC) - datetime.fromisoformat(newest)).days)
-    return latest or "unknown", 0, days, bool(data.get("info", {}).get("yanked", False)), ()
+    if eco == "pypi":
+        dates = [upload.get("upload_time_iso_8601", "") for releases in data.get("releases", {}).values() for upload in releases]
+        newest = max(dates, default="")
+        archived = bool(data.get("info", {}).get("yanked", False))
+    elif eco == "npm":
+        newest = data.get("time", {}).get(latest, "")
+        archived = False
+    else:
+        async with httpx.AsyncClient(timeout=12) as client:
+            registration = await client.get(f"https://api.nuget.org/v3/registration5-semver1/{name.lower()}/index.json")
+        registration.raise_for_status()
+        catalog = [item.get("catalogEntry", {}) for page in registration.json().get("items", []) for item in page.get("items", [])]
+        newest = max((item.get("published", "") for item in catalog), default="")
+        archived = False
+    return latest or "unknown", _versions_behind(required, versions), _iso_days_old(newest), archived, ()

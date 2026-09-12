@@ -40,7 +40,7 @@ async def test_scan_then_badge_uses_computed_score(monkeypatch):
     async def fake_manifest(owner, repo, branch):
         return [("pypi", "fixture-package", "^1")]
 
-    async def fake_meta(eco, name):
+    async def fake_meta(eco, name, required="unbounded"):
         return "2.0", 0, 0, False, ()
 
     monkeypatch.setattr("app.main.github_repo", fake_repo)

@@ -130,7 +130,7 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
             await db.flush()
         else:
             dep.current_version_required = required
-        latest_v, behind, days, archived, cves = await package_meta(eco, dep_name)
+        latest_v, behind, days, archived, cves = await package_meta(eco, dep_name, required)
         sig = DependencySignals(behind, days, archived, cves)
         deductions = dependency_deductions(sig)
         score = dependency_score(sig)

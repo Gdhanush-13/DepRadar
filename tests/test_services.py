@@ -1,6 +1,6 @@
 import pytest
 
-from app.services import normalize_repo, parse_manifest
+from app.services import _split_requirement, _versions_behind, normalize_repo, parse_manifest
 
 
 def test_normalize_repo_accepts_url():
@@ -29,6 +29,11 @@ def test_parse_requirements_fallback():
     assert parse_manifest("requirements.txt", "fastapi>=1\n# comment\nhttpx\n") == [
         ("pypi", "fastapi", ">=1"), ("pypi", "httpx", "unbounded")
     ]
+
+
+def test_parse_pip_compile_continuation_and_count_versions_behind():
+    assert _split_requirement("Django==2.2.24 \\") == ("Django", "==2.2.24")
+    assert _versions_behind("==2.2.24", ["2.2.24", "3.2.25", "4.2.20", "6.1.1"]) == 3
 
 
 def test_parse_package_json_dependencies():
