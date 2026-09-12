@@ -93,7 +93,7 @@ The live service is deployed from `main` on Render using the repository `Dockerf
 
 The nightly GitHub Actions workflow calls `/api/v1/internal/rescan-all` with `APP_BASE_URL` and `INTERNAL_RESCAN_KEY` repository secrets. The deployed service does not include a separate worker process; this keeps scheduled work in the already configured workflow.
 
-Public browser and API scans are limited to 10 attempts per client IP per 10-minute rolling window by default. A `429` response includes `Retry-After`. The single Render instance also caps active scans at two and limits each scan to 100 dependencies to keep memory bounded. The limiter is intentionally in-process; use a shared central store before running multiple app instances.
+Public browser and API scans are limited to 10 attempts per client IP per 10-minute rolling window by default. A `429` response includes `Retry-After`. The single Render instance processes one scan at a time, limits metadata lookups to two at once, caps each scan at 100 dependencies, and rejects metadata responses over 5 MB to keep memory bounded. The limiter is intentionally in-process; use a shared central store before running multiple app instances.
 
 ## Quality checks
 

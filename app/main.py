@@ -33,8 +33,9 @@ templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 logger = logging.getLogger(__name__)
 
-MAX_CONCURRENT_SCANS = 2
+MAX_CONCURRENT_SCANS = 1
 SCAN_QUEUE_TIMEOUT_SECONDS = 5
+MAX_METADATA_CONCURRENCY = 2
 MAX_RATE_LIMIT_KEYS = 10_000
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 60
 
@@ -233,7 +234,7 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
 
     signals: list[DependencySignals] = []
     scores: list[float] = []
-    semaphore = asyncio.Semaphore(10)
+    semaphore = asyncio.Semaphore(MAX_METADATA_CONCURRENCY)
 
     async def resolve(item: tuple[str, str, str]):
         async with semaphore:
@@ -244,49 +245,51 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
                 return False, exc
 
     selected = deps[:100]
-    metadata = await asyncio.gather(*(resolve(item) for item in selected))
-    for (eco, dep_name, required), (ok, result) in zip(selected, metadata):
-        dep = (await db.execute(select(Dependency).where(
-            Dependency.repository_id == repo.id, Dependency.ecosystem == eco,
-            Dependency.name == dep_name
-        ).order_by(Dependency.id.desc()).limit(1))).scalar_one_or_none()
-        if dep is None:
-            dep = Dependency(repository_id=repo.id, ecosystem=eco, name=dep_name,
-                             current_version_required=required)
-            db.add(dep)
-            await db.flush()
-        else:
-            dep.current_version_required = required
+    for batch_start in range(0, len(selected), MAX_METADATA_CONCURRENCY):
+        batch = selected[batch_start:batch_start + MAX_METADATA_CONCURRENCY]
+        metadata = await asyncio.gather(*(resolve(item) for item in batch))
+        for (eco, dep_name, required), (ok, result) in zip(batch, metadata):
+            dep = (await db.execute(select(Dependency).where(
+                Dependency.repository_id == repo.id, Dependency.ecosystem == eco,
+                Dependency.name == dep_name
+            ).order_by(Dependency.id.desc()).limit(1))).scalar_one_or_none()
+            if dep is None:
+                dep = Dependency(repository_id=repo.id, ecosystem=eco, name=dep_name,
+                                 current_version_required=required)
+                db.add(dep)
+                await db.flush()
+            else:
+                dep.current_version_required = required
 
-        if not ok:
-            scan.unresolved_count += 1
+            if not ok:
+                scan.unresolved_count += 1
+                db.add(DependencySnapshot(
+                    scan_id=scan.id, dependency_id=dep.id, latest_version="unavailable",
+                    # Older deployed schemas made this column non-nullable; the
+                    # resolution status still exposes archive state as unknown.
+                    is_archived_upstream=False, resolution_status="unresolved",
+                ))
+                continue
+
+            latest_v, behind, days, archived, cves, severities = result
+            signal = DependencySignals(behind, days, archived is True, severities)
+            deductions = dependency_deductions(signal)
+            item_score = dependency_score(signal)
             db.add(DependencySnapshot(
-                scan_id=scan.id, dependency_id=dep.id, latest_version="unavailable",
-                # Older deployed schemas made this column non-nullable; the
-                # resolution status still exposes archive state as unknown.
-                is_archived_upstream=False, resolution_status="unresolved",
+                scan_id=scan.id, dependency_id=dep.id, latest_version=latest_v,
+                versions_behind=behind, days_since_last_release=days,
+                # Providers can omit repository metadata. The deployed PostgreSQL
+                # schema requires a concrete boolean, so unknown archive status is
+                # stored as active while the metadata lookup remains successful.
+                is_archived_upstream=archived is True, known_cves=list(cves),
+                cve_severities=list(severities), resolution_status="resolved",
+                points_deducted=100 - item_score, lag_points=deductions["lag"],
+                age_points=deductions["age"], archived_points=deductions["archived"],
+                cve_points=deductions["cves"],
             ))
-            continue
-
-        latest_v, behind, days, archived, cves, severities = result
-        signal = DependencySignals(behind, days, archived is True, severities)
-        deductions = dependency_deductions(signal)
-        item_score = dependency_score(signal)
-        db.add(DependencySnapshot(
-            scan_id=scan.id, dependency_id=dep.id, latest_version=latest_v,
-            versions_behind=behind, days_since_last_release=days,
-            # Providers can omit repository metadata. The deployed PostgreSQL
-            # schema requires a concrete boolean, so unknown archive status is
-            # stored as active while the metadata lookup remains successful.
-            is_archived_upstream=archived is True, known_cves=list(cves),
-            cve_severities=list(severities), resolution_status="resolved",
-            points_deducted=100 - item_score, lag_points=deductions["lag"],
-            age_points=deductions["age"], archived_points=deductions["archived"],
-            cve_points=deductions["cves"],
-        ))
-        if not dep.is_ignored:
-            signals.append(signal)
-            scores.append(item_score)
+            if not dep.is_ignored:
+                signals.append(signal)
+                scores.append(item_score)
 
     scan.status = "complete" if scores else "no_dependencies"
     scan.freshness_score = freshness_score(scores) if scores else None

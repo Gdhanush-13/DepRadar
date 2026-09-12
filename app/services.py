@@ -12,6 +12,7 @@ from .config import settings
 
 DependencySpec = tuple[str, str, str]
 MAX_MANIFEST_DEPENDENCIES = 100
+MAX_METADATA_RESPONSE_BYTES = 5_000_000
 
 
 def normalize_repo(value: str) -> tuple[str, str]:
@@ -54,14 +55,14 @@ async def manifest(owner: str, repo: str, branch: str) -> list[tuple[str, str, s
                 f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{filename}",
                 headers=headers,
             )
-            if r.status_code != 200:
+            if r.status_code != 200 or len(r.content) > MAX_METADATA_RESPONSE_BYTES:
                 continue
             result.extend(parse_manifest(filename, r.text))
         tree = await client.get(
             f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1",
             headers={"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {settings.github_token}"} if settings.github_token else {})},
         )
-        if tree.status_code == 200:
+        if tree.status_code == 200 and len(tree.content) <= MAX_METADATA_RESPONSE_BYTES:
             for path in tree.json().get("tree", []):
                 filename = path.get("path", "")
                 if not filename.lower().endswith(".csproj"):
@@ -70,7 +71,7 @@ async def manifest(owner: str, repo: str, branch: str) -> list[tuple[str, str, s
                     f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{filename}",
                     headers=headers,
                 )
-                if r.status_code == 200:
+                if r.status_code == 200 and len(r.content) <= MAX_METADATA_RESPONSE_BYTES:
                     result.extend(parse_manifest(".csproj", r.text))
                     if len(result) >= MAX_MANIFEST_DEPENDENCIES:
                         break
@@ -244,6 +245,8 @@ async def package_meta(
     async with httpx.AsyncClient(timeout=12) as client:
         response = await client.get(url)
         response.raise_for_status()
+        if len(response.content) > MAX_METADATA_RESPONSE_BYTES:
+            raise ValueError(f"Metadata response for {name} is too large")
         data = response.json()
         versions: list[str] = (
             list(data.get("releases", {}).keys())
@@ -275,6 +278,8 @@ async def package_meta(
                 f"https://api.nuget.org/v3/registration5-semver1/{name.lower()}/index.json"
             )
             registration.raise_for_status()
+            if len(registration.content) > MAX_METADATA_RESPONSE_BYTES:
+                raise ValueError(f"NuGet registration for {name} is too large")
             catalog = [
                 item.get("catalogEntry", {})
                 for page in registration.json().get("items", [])
