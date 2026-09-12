@@ -11,6 +11,7 @@ from packaging.version import InvalidVersion, Version
 from .config import settings
 
 DependencySpec = tuple[str, str, str]
+MAX_MANIFEST_DEPENDENCIES = 100
 
 
 def normalize_repo(value: str) -> tuple[str, str]:
@@ -71,7 +72,9 @@ async def manifest(owner: str, repo: str, branch: str) -> list[tuple[str, str, s
                 )
                 if r.status_code == 200:
                     result.extend(parse_manifest(".csproj", r.text))
-    return result
+                    if len(result) >= MAX_MANIFEST_DEPENDENCIES:
+                        break
+    return result[:MAX_MANIFEST_DEPENDENCIES]
 
 
 def parse_manifest(filename: str, content: str) -> list[DependencySpec]:

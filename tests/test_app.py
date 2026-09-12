@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.config import settings, validate_production_config
 from app.db import SessionLocal, init_db
-from app.main import app, risk_color, scan_rate_limiter, scan_repo
+from app.main import MAX_RATE_LIMIT_KEYS, app, risk_color, scan_rate_limiter, scan_repo
 from app.models import Dependency, DependencySnapshot, Repository, Scan
 
 
@@ -177,6 +177,19 @@ async def test_scan_rate_limit_expires_after_window(monkeypatch):
         assert (await scan_rate_limiter.check("expiry-ip", now=100))[0] is True
         assert (await scan_rate_limiter.check("expiry-ip", now=109))[0] is False
         assert (await scan_rate_limiter.check("expiry-ip", now=110))[0] is True
+    finally:
+        await scan_rate_limiter.clear()
+
+
+@pytest.mark.asyncio
+async def test_scan_rate_limiter_bounds_client_key_memory(monkeypatch):
+    monkeypatch.setattr(settings, "scan_rate_limit_per_window", 1)
+    monkeypatch.setattr(settings, "scan_rate_window_seconds", 600)
+    await scan_rate_limiter.clear()
+    try:
+        for index in range(MAX_RATE_LIMIT_KEYS + 25):
+            await scan_rate_limiter.check(f"ip-{index}", now=100)
+        assert len(scan_rate_limiter._attempts) == MAX_RATE_LIMIT_KEYS
     finally:
         await scan_rate_limiter.clear()
 

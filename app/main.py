@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
@@ -33,6 +33,11 @@ templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 logger = logging.getLogger(__name__)
 
+MAX_CONCURRENT_SCANS = 2
+SCAN_QUEUE_TIMEOUT_SECONDS = 5
+MAX_RATE_LIMIT_KEYS = 10_000
+RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 60
+
 class ScanRateLimiter:
     """Small-process limiter for the public scan endpoints.
 
@@ -42,14 +47,27 @@ class ScanRateLimiter:
     """
 
     def __init__(self) -> None:
-        self._attempts: dict[str, deque[float]] = defaultdict(deque)
+        self._attempts: OrderedDict[str, deque[float]] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._last_cleanup = 0.0
 
     async def check(self, key: str, now: float | None = None) -> tuple[bool, int, int]:
         current = time.monotonic() if now is None else now
         window = max(1, settings.scan_rate_window_seconds or DEFAULT_SCAN_RATE_WINDOW_SECONDS)
         limit = max(1, settings.scan_rate_limit_per_window or DEFAULT_SCAN_RATE_LIMIT)
         async with self._lock:
+            if current - self._last_cleanup >= RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
+                for stored_key, stored_attempts in list(self._attempts.items()):
+                    while stored_attempts and current - stored_attempts[0] >= window:
+                        stored_attempts.popleft()
+                    if not stored_attempts:
+                        del self._attempts[stored_key]
+                self._last_cleanup = current
+            if key not in self._attempts:
+                while len(self._attempts) >= MAX_RATE_LIMIT_KEYS:
+                    self._attempts.popitem(last=False)
+                self._attempts[key] = deque()
+            self._attempts.move_to_end(key)
             attempts = self._attempts[key]
             while attempts and current - attempts[0] >= window:
                 attempts.popleft()
@@ -62,9 +80,11 @@ class ScanRateLimiter:
     async def clear(self) -> None:
         async with self._lock:
             self._attempts.clear()
+            self._last_cleanup = 0.0
 
 
 scan_rate_limiter = ScanRateLimiter()
+scan_capacity = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
 
 
 def scan_client_key(request: Request) -> str:
@@ -93,9 +113,25 @@ async def limit_public_scans(request: Request, call_next):
                 status_code=429,
                 headers=headers,
             )
-        response = await call_next(request)
-        response.headers.update(headers)
-        return response
+        try:
+            await asyncio.wait_for(scan_capacity.acquire(), timeout=SCAN_QUEUE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            busy_message = "Scans are busy right now — please try again in a moment"
+            if is_api_scan:
+                return JSONResponse({"detail": busy_message}, status_code=503, headers=headers)
+            return templates.TemplateResponse(
+                request=request,
+                name="error.html",
+                context={"message": busy_message, "repo": "scan"},
+                status_code=503,
+                headers=headers,
+            )
+        try:
+            response = await call_next(request)
+            response.headers.update(headers)
+            return response
+        finally:
+            scan_capacity.release()
     return await call_next(request)
 
 
