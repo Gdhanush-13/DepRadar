@@ -1,5 +1,8 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_SCAN_RATE_LIMIT = 10
+DEFAULT_SCAN_RATE_WINDOW_SECONDS = 600
+
 
 class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./depradar.db"
@@ -10,6 +13,8 @@ class Settings(BaseSettings):
     github_client_secret: str | None = None
     app_base_url: str = "http://localhost:8000"
     internal_rescan_key: str = "dev-internal-key-change-me"
+    scan_rate_limit_per_window: int = DEFAULT_SCAN_RATE_LIMIT
+    scan_rate_window_seconds: int = DEFAULT_SCAN_RATE_WINDOW_SECONDS
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

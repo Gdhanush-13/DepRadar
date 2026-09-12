@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.config import settings, validate_production_config
 from app.db import SessionLocal, init_db
-from app.main import app, risk_color, scan_repo
+from app.main import app, risk_color, scan_rate_limiter, scan_repo
 from app.models import Dependency, DependencySnapshot, Repository, Scan
 
 
@@ -93,6 +93,92 @@ async def test_internal_rescan_requires_key():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/internal/rescan-all", headers={"x-internal-key": "wrong"})
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_public_scan_rate_limit_returns_retry_after(monkeypatch):
+    monkeypatch.setattr(settings, "scan_rate_limit_per_window", 1)
+    monkeypatch.setattr(settings, "scan_rate_window_seconds", 60)
+    await scan_rate_limiter.clear()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post("/scan", data={"repo": "not-a-repo"})
+            second = await client.post("/scan", data={"repo": "not-a-repo"})
+        assert first.status_code == 422
+        assert second.status_code == 429
+        assert "Too many scans from this location" in second.text
+        assert 1 <= int(second.headers["retry-after"]) <= 60
+        assert second.headers["x-ratelimit-remaining"] == "0"
+    finally:
+        await scan_rate_limiter.clear()
+
+
+@pytest.mark.asyncio
+async def test_scan_rate_limit_allows_requests_up_to_limit(monkeypatch):
+    monkeypatch.setattr(settings, "scan_rate_limit_per_window", 2)
+    monkeypatch.setattr(settings, "scan_rate_window_seconds", 60)
+    await scan_rate_limiter.clear()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            responses = [await client.post("/scan", data={"repo": "not-a-repo"}) for _ in range(3)]
+        assert [response.status_code for response in responses] == [422, 422, 429]
+    finally:
+        await scan_rate_limiter.clear()
+
+
+@pytest.mark.asyncio
+async def test_scan_rate_limit_is_per_forwarded_ip(monkeypatch):
+    monkeypatch.setattr(settings, "scan_rate_limit_per_window", 1)
+    monkeypatch.setattr(settings, "scan_rate_window_seconds", 60)
+    await scan_rate_limiter.clear()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first_ip = {"X-Forwarded-For": "203.0.113.10, 10.0.0.1"}
+            second_ip = {"X-Forwarded-For": "203.0.113.11"}
+            first = await client.post("/scan", data={"repo": "not-a-repo"}, headers=first_ip)
+            blocked = await client.post("/scan", data={"repo": "not-a-repo"}, headers=first_ip)
+            independent = await client.post("/scan", data={"repo": "not-a-repo"}, headers=second_ip)
+        assert first.status_code == 422
+        assert blocked.status_code == 429
+        assert independent.status_code == 422
+    finally:
+        await scan_rate_limiter.clear()
+
+
+@pytest.mark.asyncio
+async def test_scan_rate_limit_expires_after_window(monkeypatch):
+    monkeypatch.setattr(settings, "scan_rate_limit_per_window", 1)
+    monkeypatch.setattr(settings, "scan_rate_window_seconds", 10)
+    await scan_rate_limiter.clear()
+    try:
+        assert (await scan_rate_limiter.check("expiry-ip", now=100))[0] is True
+        assert (await scan_rate_limiter.check("expiry-ip", now=109))[0] is False
+        assert (await scan_rate_limiter.check("expiry-ip", now=110))[0] is True
+    finally:
+        await scan_rate_limiter.clear()
+
+
+@pytest.mark.asyncio
+async def test_api_scan_limit_returns_json_and_gets_are_unaffected(monkeypatch):
+    monkeypatch.setattr(settings, "scan_rate_limit_per_window", 1)
+    monkeypatch.setattr(settings, "scan_rate_window_seconds", 60)
+
+    async def missing_repo(owner, repo):
+        raise ValueError("GitHub repository was not found")
+
+    monkeypatch.setattr("app.main.github_repo", missing_repo)
+    await scan_rate_limiter.clear()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post("/api/v1/repos/foo/bar/scan")
+            blocked = await client.post("/api/v1/repos/foo/bar/scan")
+            badge = await client.get("/badge/example/example.svg")
+        assert first.status_code == 422
+        assert blocked.status_code == 429
+        assert blocked.json()["detail"] == "Too many scans from this location — try again in a few minutes"
+        assert badge.status_code == 200
+    finally:
+        await scan_rate_limiter.clear()
 
 @pytest.mark.asyncio
 async def test_score_history_and_cached_badges():

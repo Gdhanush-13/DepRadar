@@ -1,15 +1,22 @@
 import asyncio
 import logging
+import time
+from collections import defaultdict, deque
 from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import settings, validate_production_config
+from .config import (
+    DEFAULT_SCAN_RATE_LIMIT,
+    DEFAULT_SCAN_RATE_WINDOW_SECONDS,
+    settings,
+    validate_production_config,
+)
 from .db import get_db, init_db
 from .models import BadgeCache, Dependency, DependencySnapshot, Repository, Scan
 from .scoring import (
@@ -25,6 +32,71 @@ app = FastAPI(title="DepRadar", version="1.0.0", description="Dependency freshne
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 logger = logging.getLogger(__name__)
+
+class ScanRateLimiter:
+    """Small-process limiter for the public scan endpoints.
+
+    Render currently runs one service instance. The limiter is intentionally
+    dependency-free; a multi-instance deployment should move this state to a
+    shared store before scaling horizontally.
+    """
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = asyncio.Lock()
+
+    async def check(self, key: str, now: float | None = None) -> tuple[bool, int, int]:
+        current = time.monotonic() if now is None else now
+        window = max(1, settings.scan_rate_window_seconds or DEFAULT_SCAN_RATE_WINDOW_SECONDS)
+        limit = max(1, settings.scan_rate_limit_per_window or DEFAULT_SCAN_RATE_LIMIT)
+        async with self._lock:
+            attempts = self._attempts[key]
+            while attempts and current - attempts[0] >= window:
+                attempts.popleft()
+            if len(attempts) >= limit:
+                retry_after = max(1, int(window - (current - attempts[0])))
+                return False, 0, retry_after
+            attempts.append(current)
+            return True, max(0, limit - len(attempts)), 0
+
+    async def clear(self) -> None:
+        async with self._lock:
+            self._attempts.clear()
+
+
+scan_rate_limiter = ScanRateLimiter()
+
+
+def scan_client_key(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def limit_public_scans(request: Request, call_next):
+    is_api_scan = request.url.path.startswith("/api/v1/repos/") and request.url.path.endswith("/scan")
+    if request.method == "POST" and (request.url.path == "/scan" or is_api_scan):
+        allowed, remaining, retry_after = await scan_rate_limiter.check(scan_client_key(request))
+        headers = {"X-RateLimit-Limit": str(max(1, settings.scan_rate_limit_per_window or DEFAULT_SCAN_RATE_LIMIT)),
+                   "X-RateLimit-Remaining": str(remaining)}
+        if not allowed:
+            headers["Retry-After"] = str(retry_after)
+            message = "Too many scans from this location — try again in a few minutes"
+            if is_api_scan:
+                return JSONResponse({"detail": message}, status_code=429, headers=headers)
+            return templates.TemplateResponse(
+                request=request,
+                name="error.html",
+                context={"message": message, "repo": "scan"},
+                status_code=429,
+                headers=headers,
+            )
+        response = await call_next(request)
+        response.headers.update(headers)
+        return response
+    return await call_next(request)
 
 
 @app.middleware("http")

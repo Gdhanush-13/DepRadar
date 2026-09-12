@@ -60,6 +60,8 @@ Copy `.env.example` to `.env`. Never commit `.env` or production credentials.
 | `APP_BASE_URL` | Yes | Public URL used in badge links |
 | `GITHUB_TOKEN` | Recommended | Raises GitHub API rate limits; read-only public access is sufficient |
 | `INTERNAL_RESCAN_KEY` | Yes for nightly rescan | Secret sent by the scheduled workflow |
+| `SCAN_RATE_LIMIT_PER_WINDOW` | Recommended | Anonymous scan attempts per client IP; defaults to 10 |
+| `SCAN_RATE_WINDOW_SECONDS` | Recommended | Rolling rate-limit window; defaults to 600 seconds (10 minutes) |
 
 ## Routes and API
 
@@ -90,6 +92,8 @@ Badge example:
 The live service is deployed from `main` on Render using the repository `Dockerfile`. Neon PostgreSQL provides production data. Redis is not required by the current application and is intentionally not part of the deployment. Set the variables above in Render; do not store their values in GitHub. Every push to `main` runs CI and triggers the Render deployment integration.
 
 The nightly GitHub Actions workflow calls `/api/v1/internal/rescan-all` with `APP_BASE_URL` and `INTERNAL_RESCAN_KEY` repository secrets. The deployed service does not include a separate worker process; this keeps scheduled work in the already configured workflow.
+
+Public browser and API scans are limited to 10 attempts per client IP per 10-minute rolling window by default. A `429` response includes `Retry-After`. The limiter is intentionally in-process for the single Render instance; use a shared central store before running multiple app instances.
 
 ## Quality checks
 
