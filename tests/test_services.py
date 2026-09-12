@@ -31,6 +31,16 @@ def test_parse_requirements_fallback():
     ]
 
 
+def test_parse_environment_markers_and_vcs_requirements():
+    parsed = parse_manifest(
+        "requirements.txt",
+        "Django==2.2.24; python_version >= '2.7'\n"
+        "-e git+https://github.com/example/private-package.git#egg=private-package\n"
+        "--hash=sha256:ignored\n",
+    )
+    assert parsed == [("pypi", "Django", "==2.2.24"), ("pypi", "private-package", "vcs")]
+
+
 def test_parse_pip_compile_continuation_and_count_versions_behind():
     assert _split_requirement("Django==2.2.24 \\") == ("Django", "==2.2.24")
     assert _versions_behind("==2.2.24", ["2.2.24", "3.2.25", "4.2.20", "6.1.1"]) == 3

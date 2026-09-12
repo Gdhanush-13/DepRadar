@@ -5,7 +5,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.db import SessionLocal, init_db
-from app.main import app, scan_repo
+from app.main import app, risk_color, scan_repo
 from app.models import Dependency, DependencySnapshot, Repository, Scan, User
 
 
@@ -103,8 +103,14 @@ async def test_score_history_and_cached_badges():
         missing = await client.get("/api/v1/repos/nope/nope/score")
     assert score.json()["freshness_score"] == 88
     assert len(history.json()["history"]) >= 1
-    assert "#ef4444" in badge.text
+    assert "#22c55e" in badge.text
     assert missing.status_code == 404
+
+
+def test_risk_color_is_lower_is_better():
+    assert risk_color(10) == "#22c55e"
+    assert risk_color(40) == "#eab308"
+    assert risk_color(80) == "#ef4444"
 
 
 @pytest.mark.asyncio
@@ -163,5 +169,9 @@ async def test_registered_dependency_ignore_recalculates_score():
         denied = await client.post(f"/api/v1/repos/ignore/{suffix}/dependencies/pytest/ignore?ignored=true")
         changed = await client.post(f"/api/v1/repos/ignore/{suffix}/dependencies/pytest/ignore?ignored=true",
                                     headers={"X-User-ID": str(user.id)})
+        score = await client.get(f"/api/v1/repos/ignore/{suffix}/score")
+        badge = await client.get(f"/badge/ignore/{suffix}.svg")
     assert denied.status_code == 401
     assert changed.status_code == 200 and changed.json()["ignored"] is True
+    assert score.json()["freshness_score"] == 100 and score.json()["risk_score"] == 0
+    assert 'aria-label="DepRadar: 100"' in badge.text

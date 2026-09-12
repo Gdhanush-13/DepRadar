@@ -201,6 +201,15 @@ async def set_dependency_ignored(
         if snap_dep is not None and not snap_dep.is_ignored:
             active.append(max(0, 100 - snap.points_deducted))
     scan.freshness_score = freshness_score(active)
+    active_signals = []
+    for snap in snapshots:
+        snap_dep = await db.get(Dependency, snap.dependency_id)
+        if snap_dep is not None and not snap_dep.is_ignored:
+            active_signals.append(DependencySignals(
+                snap.versions_behind, snap.days_since_last_release,
+                snap.is_archived_upstream, tuple(snap.known_cves or ())
+            ))
+    scan.risk_score = risk_score(active_signals)
     cache = await db.get(BadgeCache, item.full_name)
     if cache:
         cache.score = scan.freshness_score
@@ -283,6 +292,10 @@ def score_color(value: float) -> str:
     return "#22c55e" if value >= 80 else "#eab308" if value >= 50 else "#ef4444"
 
 
+def risk_color(value: float) -> str:
+    return "#22c55e" if value <= 20 else "#eab308" if value <= 50 else "#ef4444"
+
+
 @app.get("/badge/{owner}/{repo}.svg")
 async def badge(
     owner: str, repo: str, metric: str = Query("freshness"), db: AsyncSession = Depends(get_db)
@@ -297,7 +310,7 @@ async def badge(
             badge_svg("DepRadar", "not scanned", "#64748b"), media_type="image/svg+xml",
             headers={"Cache-Control": "public, max-age=60"},
         )
-    color = score_color(value)
+    color = risk_color(value) if metric == "risk" else score_color(value)
     return Response(
         badge_svg("DepRadar", f"{value:.0f}", color),
         media_type="image/svg+xml",

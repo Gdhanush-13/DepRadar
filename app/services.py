@@ -108,9 +108,17 @@ def parse_manifest(filename: str, content: str) -> list[DependencySpec]:
     result = []
     for line in content.splitlines():
         line = line.strip()
-        if line and not line.startswith(("#", "-")):
-            name, version = _split_requirement(line)
-            result.append(("pypi", name, version))
+        if not line or line.startswith(("#", "--hash")):
+            continue
+        if line.startswith(("-e ", "--editable ", "git+")):
+            egg = re.search(r"#egg=([A-Za-z0-9_.-]+)", line)
+            if egg:
+                result.append(("pypi", egg.group(1), "vcs"))
+            continue
+        if line.startswith("-"):
+            continue
+        name, version = _split_requirement(line)
+        result.append(("pypi", name, version))
     return result
 
 
