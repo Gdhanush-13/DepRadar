@@ -239,7 +239,10 @@ async def scan_repo(owner: str, name: str, db: AsyncSession) -> Scan:
         db.add(DependencySnapshot(
             scan_id=scan.id, dependency_id=dep.id, latest_version=latest_v,
             versions_behind=behind, days_since_last_release=days,
-            is_archived_upstream=archived, known_cves=list(cves),
+            # Providers can omit repository metadata. The deployed PostgreSQL
+            # schema requires a concrete boolean, so unknown archive status is
+            # stored as active while the metadata lookup remains successful.
+            is_archived_upstream=archived is True, known_cves=list(cves),
             cve_severities=list(severities), resolution_status="resolved",
             points_deducted=100 - item_score, lag_points=deductions["lag"],
             age_points=deductions["age"], archived_points=deductions["archived"],

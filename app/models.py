@@ -68,7 +68,7 @@ class DependencySnapshot(Base):
     dependency_id: Mapped[int] = mapped_column(ForeignKey("dependencies.id"))
     latest_version: Mapped[str] = mapped_column(String(100), default="unknown")
     versions_behind: Mapped[int] = mapped_column(Integer, default=0)
-    is_archived_upstream: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    is_archived_upstream: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     resolution_status: Mapped[str] = mapped_column(String(30), default="resolved")
     days_since_last_release: Mapped[int] = mapped_column(Integer, default=0)
     known_cves: Mapped[list] = mapped_column(JSON, default=list)

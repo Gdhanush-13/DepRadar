@@ -65,6 +65,29 @@ async def test_scan_then_badge_uses_computed_score(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scan_persists_unknown_archive_metadata_as_false(monkeypatch):
+    async def fake_repo(owner, repo):
+        return {"default_branch": "main", "pushed_at": "fixture"}
+
+    async def fake_manifest(owner, repo, branch):
+        return [("nuget", "fixture-package", "0.1")]
+
+    async def fake_meta(eco, name, required="unbounded"):
+        return "0.2", 0, 24, None, (), ()
+
+    monkeypatch.setattr("app.main.github_repo", fake_repo)
+    monkeypatch.setattr("app.main.manifest", fake_manifest)
+    monkeypatch.setattr("app.main.package_meta", fake_meta)
+    await init_db()
+    async with SessionLocal() as db:
+        scan = await scan_repo("archive-owner", "archive-repo", db)
+        snapshot = (await db.execute(
+            select(DependencySnapshot).where(DependencySnapshot.scan_id == scan.id)
+        )).scalar_one()
+    assert snapshot.is_archived_upstream is False
+
+
+@pytest.mark.asyncio
 async def test_home_history_and_scan_error_pages(monkeypatch):
     async def missing_repo(owner, repo):
         raise ValueError("GitHub repository was not found")
