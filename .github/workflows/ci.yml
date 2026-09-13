@@ -1,0 +1,22 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: overfetch, POSTGRES_USER: overfetch, POSTGRES_DB: overfetch }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U overfetch -d overfetch" --health-interval=5s --health-timeout=5s --health-retries=10
+    env: { DATABASE_URL: postgresql://overfetch:overfetch@localhost:5432/overfetch, OVERFETCH_ENV: test, AUTH_SECRET: test-secret }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm run db:migrate
+      - run: npm run typecheck
+      - run: npm test

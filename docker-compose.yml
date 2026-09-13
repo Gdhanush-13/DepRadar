@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: overfetch
+      POSTGRES_PASSWORD: overfetch
+      POSTGRES_DB: overfetch
+    ports: ["5432:5432"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U overfetch -d overfetch"], interval: 5s, timeout: 5s, retries: 10 }
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://overfetch:overfetch@postgres:5432/overfetch?schema=public
+      PORT: 3000
+      OVERFETCH_ENV: development
+      AUTH_SECRET: local-development-secret-change-me
+      DATALOADER_ENABLED: "true"
+    ports: ["3000:3000"]
+    depends_on: { postgres: { condition: service_healthy } }
