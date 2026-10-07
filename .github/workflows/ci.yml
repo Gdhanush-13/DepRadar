@@ -18,5 +18,7 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run db:migrate
+      - run: npm run db:seed
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm test
